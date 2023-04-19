@@ -1,0 +1,12 @@
+"","Feature","pval","pval.adj","log2FC","ordering","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"3","ASV_0003",0.0144632124830901,0.0499638249415838,-1.59906608212725,"d0>d8","t-test - ALR (tta)","Bacteria","Actinobacteria","Actinobacteria","Bifidobacteriales","Bifidobacteriaceae",NA,NA
+"4","ASV_0006",4.36109379526026e-05,0.0005524052140663,-2.54059724586062,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Lactobacillaceae",NA,NA
+"6","ASV_0009",0.00014630389425987,0.00138988699546876,-1.99062711291815,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae",NA,NA
+"17","ASV_0045",0.000266594627715563,0.00202611917063828,-2.07338137148221,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Clostridia","Clostridiales","Peptostreptococcaceae",NA,NA
+"18","ASV_0046",0.00575362810142775,0.0218637867854254,-1.4680054802233,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Streptococcaceae",NA,NA
+"20","ASV_0058",0.00149543729762661,0.0081180881871159,-1.35427849395123,"d0>d8","t-test - ALR (tta)","Bacteria","Actinobacteria","Coriobacteriia","Eggerthellales","Eggerthellaceae",NA,NA
+"24","ASV_0107",1.93852753179792e-06,7.3664046208321e-05,-2.92233036812446,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Enterococcaceae",NA,NA
+"26","ASV_0115",0.00451075075523473,0.0190453920776578,-1.80119401066945,"d0>d8","t-test - ALR (tta)","Bacteria","Actinobacteria","Actinobacteria","Micrococcales","Micrococcaceae",NA,NA
+"35","ASV_0486",0.00401277032931947,0.0190453920776578,-1.26791927907725,"d0>d8","t-test - ALR (tta)","Bacteria","Proteobacteria","Alphaproteobacteria","Sphingomonadales","Sphingomonadaceae",NA,NA
+"36","ASV_0515",3.28896368032221e-05,0.0005524052140663,-1.84519658286605,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelatoclostridiaceae",NA,NA
+"37","ASV_0713",0.00118561248654128,0.00750887908142813,-1.35097050362237,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Negativicutes","Veillonellales","Veillonellaceae",NA,NA

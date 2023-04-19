@@ -1,0 +1,5 @@
+"","Feature","pval","pval.adj","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"4","ASV_0005",0.00288660631192029,0.0499384979475942,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Lactobacillaceae",NA,NA
+"16","ASV_0041",0.00368774393065398,0.0499384979475942,"ANOVA - ALR (aoa)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Rikenellaceae",NA,NA
+"37","ASV_0404",3.81256434448028e-12,1.56315138123692e-10,"ANOVA - ALR (aoa)","Bacteria","Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria",NA,NA
+"38","ASV_0459",0.00487204858025309,0.0499384979475942,"ANOVA - ALR (aoa)","Bacteria","Tenericutes","Mollicutes","Anaeroplasmatales","Anaeroplasmataceae",NA,NA

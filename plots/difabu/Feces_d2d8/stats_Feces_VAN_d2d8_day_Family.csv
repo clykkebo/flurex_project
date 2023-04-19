@@ -1,0 +1,7 @@
+"","Feature","pval","pval.adj","log2FC","ordering","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"9","ASV_0014",0.000352828797428897,0.00341067837514601,2.95986050520063,"d8>d2","t-test - ALR (tta)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Porphyromonadaceae",NA,NA
+"11","ASV_0024",0.00627753922601898,0.0303414395924251,-1.88354115316299,"d2>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Clostridia","Clostridiales","Clostridiaceae_1",NA,NA
+"19","ASV_0058",0.000701921128366516,0.00407114254452579,-2.70674499324076,"d2>d8","t-test - ALR (tta)","Bacteria","Actinobacteria","Coriobacteriia","Eggerthellales","Eggerthellaceae",NA,NA
+"21","ASV_0101",2.2750456033342e-05,0.000659763224966918,-2.77928738078579,"d2>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Clostridia","Class_Clostridia","Class_Clostridia",NA,NA
+"26","ASV_0122",0.000505358717458916,0.00366385070157714,-3.728725212851,"d2>d8","t-test - ALR (tta)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Odoribacteraceae",NA,NA
+"29","ASV_0288",0.000152325499613625,0.00220871974439756,-3.14580370679795,"d2>d8","t-test - ALR (tta)","Bacteria","Tenericutes","Mollicutes","Anaeroplasmatales","Anaeroplasmataceae",NA,NA

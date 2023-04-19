@@ -1,0 +1,14 @@
+"","Feature","pval","pval.adj","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"4","ASV_0005",0.000135376072684607,0.00321518172625941,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Lactobacillaceae","Ligilactobacillus",NA
+"17","ASV_0027",0.000569783762918905,0.0108258914954592,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Clostridia","Clostridiales","Ruminococcaceae","Oscillibacter",NA
+"23","ASV_0041",0.00192938799994081,0.0183291859994377,"ANOVA - ALR (aoa)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Rikenellaceae","Alistipes",NA
+"32","ASV_0075",7.6244267316495e-06,0.000241440179835568,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Clostridia","Clostridiales","Lachnospiraceae","Lachnoanaerobaculum",NA
+"37","ASV_0094",1.26360248296982e-09,1.20042235882133e-07,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae","Clostridium_XVIII",NA
+"49","ASV_0125",0.0017875692456671,0.0183291859994377,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae","Family_Erysipelotrichaceae",NA
+"53","ASV_0150",0.00441246900396347,0.0381076868524118,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Clostridia","Clostridiales","Lachnospiraceae","Anaerotignum",NA
+"64","ASV_0202",0.000852718456673565,0.0135013755639981,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Clostridia","Clostridiales","Ruminococcaceae","Neglecta",NA
+"65","ASV_0229",0.00641324144340954,0.0468659951633774,"ANOVA - ALR (aoa)","Bacteria","Deferribacteres","Deferribacteres","Deferribacterales","Deferribacteraceae","Mucispirillum",NA
+"74","ASV_0332",0.00638482644201858,0.0468659951633774,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Clostridia","Clostridiales","Ruminococcaceae","Pseudoflavonifractor",NA
+"80","ASV_0391",0.00157156036864715,0.0183291859994377,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Clostridia","Clostridiales","Ruminococcaceae","Agathobaculum",NA
+"84","ASV_0404",6.62839156310744e-08,3.14848599247603e-06,"ANOVA - ALR (aoa)","Bacteria","Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria",NA
+"87","ASV_0459",0.00117639623009253,0.0159653774083986,"ANOVA - ALR (aoa)","Bacteria","Tenericutes","Mollicutes","Anaeroplasmatales","Anaeroplasmataceae","Anaeroplasma",NA

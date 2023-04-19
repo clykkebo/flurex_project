@@ -1,0 +1,2 @@
+"","Feature","pval","pval.adj","log2FC","ordering","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"38","ASV_0107",0.000212021052309213,0.0178097683939739,-2.05079402373674,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Enterococcaceae","Enterococcus",NA

@@ -1,0 +1,6 @@
+"","Feature","pval","pval.adj","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"1","ASV_0001",3.21208650973573e-06,9.42212042855813e-05,"ANOVA - ALR (aoa)","Bacteria","Proteobacteria","Gammaproteobacteria","Enterobacterales","Enterobacteriaceae","Escherichia/Shigella",NA
+"31","ASV_0075",2.58586800149415e-08,1.13778192065742e-06,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Clostridia","Clostridiales","Lachnospiraceae","Lachnoanaerobaculum",NA
+"35","ASV_0094",1.95713728048017e-15,1.72228080682255e-13,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae","Clostridium_XVIII",NA
+"40","ASV_0107",1.3796343582806e-05,0.000303519558821733,"ANOVA - ALR (aoa)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Enterococcaceae","Enterococcus",NA
+"79","ASV_0404",0.000806809555618567,0.0141998481788868,"ANOVA - ALR (aoa)","Bacteria","Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria",NA

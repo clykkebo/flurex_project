@@ -1,0 +1,27 @@
+"","Feature","pval","pval.adj","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"1","ASV_0001",7.64921885590394e-15,1.60633595973983e-13,"ANOVA (aov)","Bacteria","Proteobacteria","Gammaproteobacteria","Enterobacterales","Enterobacteriaceae",NA,NA
+"2","ASV_0002",2.23307628803388e-07,1.17236505121779e-06,"ANOVA (aov)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Bacteroidaceae",NA,NA
+"3","ASV_0003",7.63648078888873e-12,8.01830482833316e-11,"ANOVA (aov)","Bacteria","Actinobacteria","Actinobacteria","Bifidobacteriales","Bifidobacteriaceae",NA,NA
+"4","ASV_0005",0.000197964829391996,0.000554301522297588,"ANOVA (aov)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Lactobacillaceae",NA,NA
+"5","ASV_0008",3.12891068565628e-10,2.62828497595127e-09,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Clostridiales","Lachnospiraceae",NA,NA
+"7","ASV_0012",1.88281840524452e-09,1.31797288367116e-08,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Clostridiales","Ruminococcaceae",NA,NA
+"8","ASV_0013",0.00119417982797477,0.00295032663382003,"ANOVA (aov)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae",NA,NA
+"9","ASV_0014",0.0187963499120161,0.0303633344732568,"ANOVA (aov)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Porphyromonadaceae",NA,NA
+"11","ASV_0024",0.00250671103029876,0.00583574110743152,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Clostridiales","Clostridiaceae_1",NA,NA
+"14","ASV_0040",0.0161123898290383,0.0270959161169414,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Clostridiales","Eubacteriaceae",NA,NA
+"16","ASV_0045",2.86872475141465e-09,1.72123485084879e-08,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Clostridiales","Peptostreptococcaceae",NA,NA
+"17","ASV_0046",0.00569925002481461,0.0113985000496292,"ANOVA (aov)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Streptococcaceae",NA,NA
+"18","ASV_0050",4.33551476420882e-05,0.000140070476997516,"ANOVA (aov)","Bacteria","Proteobacteria","Deltaproteobacteria","Desulfovibrionales","Desulfovibrionaceae",NA,NA
+"19","ASV_0058",4.4959497706455e-15,1.60633595973983e-13,"ANOVA (aov)","Bacteria","Actinobacteria","Coriobacteriia","Eggerthellales","Eggerthellaceae",NA,NA
+"20","ASV_0085",3.48905501390622e-06,1.62822567315624e-05,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Clostridiales","Peptococcaceae_1",NA,NA
+"21","ASV_0086",0.00794455724717458,0.0151668820173333,"ANOVA (aov)","Bacteria","Actinobacteria","Actinobacteria","Mycobacteriales","Corynebacteriaceae",NA,NA
+"22","ASV_0096",6.66532443840882e-06,2.79943626413171e-05,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Clostridiales","Order_Clostridiales",NA,NA
+"23","ASV_0101",0.0161285214981794,0.0270959161169414,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Class_Clostridia","Class_Clostridia",NA,NA
+"28","ASV_0123",0.00263997812002854,0.00583574110743152,"ANOVA (aov)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Odoribacteraceae",NA,NA
+"29","ASV_0195",2.69966871204437e-05,9.44884049215529e-05,"ANOVA (aov)","Bacteria","Actinobacteria","Coriobacteriia","Coriobacteriales","Coriobacteriaceae",NA,NA
+"31","ASV_0251",0.00104975884710378,0.00275561697364743,"ANOVA (aov)","Bacteria","Synergistetes","Synergistia","Synergistales","Synergistaceae",NA,NA
+"32","ASV_0288",0.00394876558441947,0.00829240772728089,"ANOVA (aov)","Bacteria","Tenericutes","Mollicutes","Anaeroplasmatales","Anaeroplasmataceae",NA,NA
+"33","ASV_0307",2.16156157634582e-05,8.25323510968405e-05,"ANOVA (aov)","Bacteria","Firmicutes","Phylum_Firmicutes","Phylum_Firmicutes","Phylum_Firmicutes",NA,NA
+"34","ASV_0340",0.000146130243395214,0.000438390730185642,"ANOVA (aov)","Bacteria","Firmicutes","Clostridia","Clostridiales","Christensenellaceae",NA,NA
+"35","ASV_0404",3.75447622734313e-12,5.25626671828038e-11,"ANOVA (aov)","Bacteria","Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria",NA,NA
+"37","ASV_0515",0.00844999845083865,0.0154304319537054,"ANOVA (aov)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelatoclostridiaceae",NA,NA

@@ -1,0 +1,2032 @@
+---
+title: "Flurex Compositional Analysis"
+author: "Claus Lykkebo, Martin Steen Mortensen"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    toc_depth: 4
+    collapsed: false
+    code_folding: hide
+    number_sections: true
+knit: (function(inputFile, encoding) { 
+  rmarkdown::render(
+      inputFile, encoding = encoding,
+      output_dir = file.path(dirname(inputFile),"output"),
+      output_file = paste0("Flurex_", Sys.Date(), "_Differential_abundance_analysis.html")) 
+  })
+params:
+    input: "R_objects/Phyloseq_15000.RData"
+    batch: "run"
+    COL: !r c("CTRL" = "#606060","PFOS" = "#31b44b","VAN" = "#6699d1","VAN+PFOS" = "#efc000")
+---
+
+# GMH ASV ANALYSIS PIPELINE
+
+This Rmarkdown contains the commands necessary to perform initial differential abundance analyses of the output from the DF_GMH_PIPELINE There will be things that should be updated to fit the exact project. It is important that metadata is loaded correctly and it should contain a variable identifying negative controls and mock samples. I recommend visiting the ["Analysis of community ecology data in R"](https://www.davidzeleny.net/anadat-r/doku.php/en:start) to read about the theory behind the alpha and beta diversity and examples of the necessary R-code to execute them. For analyses of differential abundance I will use the DAtest package [(Russel et al., 2018)](https://www.biorxiv.org/content/10.1101/241802v1). Another excellent source of help is the R [cheat-sheets](https://www.rstudio.com/resources/cheatsheets/).
+
+# INFO
+
+This document has been fitted to perform beta diversity calculations of phyloseq element from the Import & QC script. It has been fitted for data from Flurex (internal project name: R20-22). The project data contains 16S V3 amplicon sequencing from feces samples from 4 different days and cecum and ileum samples from one day from 48 rats. There are feces samples from all rats from day 0, 2, 4 and 8. Cecum and ileum samples were all collected at dissection on day 8. Please read the method section for this paper for details on experimental setup.
+
+Metadata contains sample information regarding: 
+-   rat number/name, cage number (rats were co-caged 2-2), day of sampling, material (feces, cecum, ileum), sequencing information (gram of material used for extracted DNA, DNA concentrations, primers, barcodes for demultiplexing, batch number ("run" = c2, c3, c4)), treatment groups. Several columns have been created for easy sample grouping during analysis, including for distinguishing between vancomycin and PFOS treatment alone.
+
+Metadata contains results from:
+-   Bodyweight per sampling day, while cecum and liver weight for day 8 (addition column with organ weights normalised to bodyweight).
+
+-   PFOS quantification of:
+    +   Blood serum from day 4 and 8 measured in µg/mL
+    +   Liver tissue from day 8 measured in mg PFOS in full liver weight
+-   Short-chain fatty acids quantification of 10 compounds in colonic water given in mM from day 8: acetic acid, formic acid, propanoic acid, 2methyl-propanoic acid, butanoic acid, 3methyl-butanoic acid, pentanoic acid, 4methyl-pentanoic acid, hexanoic acid and heptanoic acid
+
+
+```{r setup, eval=TRUE, echo=TRUE, message=FALSE,warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries
+library(tidyverse)
+library(phyloseq)
+library(decontam)
+library(pals)
+library(ggpubr)
+library(rstatix)
+library(vegan)
+library(reshape2)
+library(DAtest)
+library(ape)
+library(kableExtra)
+library(magick)
+library(forcats)
+
+# Create used folders if missing
+if (!file.exists("R_objects")) dir.create(file.path(getwd(), "R_objects"))
+if (!file.exists("plots")) dir.create(file.path(getwd(), "plots"))
+if (!file.exists("plots/relabu")) dir.create(file.path(getwd(), "plots/relabu"))
+if (!file.exists("plots/difabu")) dir.create(file.path(getwd(), "plots/difabu"))
+if (!file.exists("tables")) dir.create(file.path(getwd(), "tables"))
+if (!file.exists("scripts")) dir.create(file.path(getwd(), "scripts"))
+
+saveRDS(params, "R_objects/comp_params.RDS")
+```
+
+## SCRIPTS {.tabset .tabset-fade .tabset-pills}
+
+This section contains the scripts for the custom functions used in this pipeline
+
+### FILTER TAXA
+
+These functions are used to merge ASV that are not one of the most abundant, or below a defined threshold, into "Other"
+
+```{r merge_taxa_scripts, eval=TRUE, echo=TRUE}
+
+# This function merges anything not in the top (10 by default) most abundant ASVs
+merge_less_than_top <- function(pobject, top=10){
+  # transform to sample counts to relative values
+  transformed <- transform_sample_counts(pobject, function(x) x/sum(x))
+
+    # Orientate and export otu table
+  if (taxa_are_rows(transformed)) otu.table <- as.data.frame(otu_table(transformed)) else otu.table <- as.data.frame(t(otu_table(transformed)))
+  
+  # sort otu table by decreasing abundance
+  otu.sort <- otu.table[order(rowMeans(otu.table), decreasing = TRUE),]
+  
+  # Create list of ASVs to merge
+  otu.list <- row.names(otu.sort[(top+1):nrow(otu.sort),])
+  if(any("Others" %in% rownames(otu.table))) otu.list <- c(otu.list,"Others")
+  
+  # perform the merger with the original sample counts
+  merged <- merge_taxa(pobject, otu.list, 1)
+  
+  # change the taxa name
+  taxa_names(merged)[taxa_names(merged) %in% otu.list[1]] <- "Others"
+  
+  # change taxa to "Other" for all levels not being NAs
+  for (i in 1:ncol(tax_table(merged))){
+    if (sum(!is.na(tax_table(merged)[,i]))){
+      tax_table(merged)["Others",i] <- "Others"
+    }
+  }
+  return(merged)
+}
+
+# This function merges ASVs that are below a defined ratio, with the default being 0.001 (0.1%)
+merge_low_abundance <- function(pobject, threshold=0.001){
+  
+  # transform to sample counts to relative values
+  transformed <- transform_sample_counts(pobject, function(x) x/sum(x))
+  
+  # Orientate and export otu table
+  if (taxa_are_rows(transformed)) otu.table <- as.data.frame(otu_table(transformed)) else otu.table <- as.data.frame(t(otu_table(transformed)))
+  
+  # Create list of ASVs to merge
+  otu.list <- row.names(otu.table[rowMeans(otu.table) < threshold,])
+  if(any("Others" %in% rownames(otu.table))) otu.list <- c(otu.list,"Others")
+
+  # perform the merger with the original sample counts
+  merged <- merge_taxa(pobject, otu.list, 1)
+  
+  # change the taxa name
+  taxa_names(merged)[taxa_names(merged) %in% otu.list[1]] <- "Others"
+  
+  # change taxa to "Other" for all levels not being NAs
+  for (i in 1:ncol(tax_table(merged))){
+    if (sum(!is.na(tax_table(merged)[,i]))){
+      tax_table(merged)["Others",i] <- "Others"
+    }
+  }
+  return(merged)
+}
+
+merge_prevalence <- function(pobject, variable, min.samples){
+  # transform to sample counts to relative values
+  if (taxa_are_rows(transformed)) otu.table <- as.data.frame(otu_table(transformed)) else otu.table <- as.data.frame(t(otu_table(transformed)))
+  
+  # make binary
+  otu.table[otu.table != 0] <- 1
+  
+  # extract metadata
+  dat <- data.frame(sample_data(pobject))
+  
+  # set groups
+  vgroup <- unique(dat[,variable])
+  
+  # create count table
+  counts <- data.frame(row.names = row.names(otu.table))
+  for (i in seq(length(vgroup))) counts[,vgroup[i]] <- rowSums(otu.table[,dat[,variable]==vgroup[i]])
+  
+  counts$keep <- ifelse(rowSums(counts) > min.sample*length(vgroup), TRUE, FALSE)
+  
+  # Create list of ASVs to merge
+  otu.list <- row.names(counts[!counts$keep,])
+  if(any("Others" %in% rownames(otu.table))) otu.list <- c(otu.list,"Others")
+
+  # perform the merger with the original sample counts
+  merged <- merge_taxa(pobject, otu.list, 1)
+  
+  # change the taxa name
+  taxa_names(merged)[taxa_names(merged) %in% otu.list[1]] <- "Others"
+  
+  # change taxa to "Other" for all levels not being NAs
+  for (i in 1:ncol(tax_table(merged))){
+    if (sum(!is.na(tax_table(merged)[,i]))){
+      tax_table(merged)["Others",i] <- "Others"
+    }
+  }
+  return(merged)
+  
+}
+# save functions
+save(merge_less_than_top, merge_low_abundance, file = "scripts/merge_abundance.Rdata")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
+invisible(gc()) #free up memory and report the memory usage.
+
+```
+
+# DIFFERENTIAL ABUNDANCE
+Analyses below are used for investigation of differential abundance between groupings of samples with the main focus of PFOS-driven differential abundance on day 8 (highest PFOS exposure).
+
+# ANALYSES USED
+## FECES DAY 8 BY TREATMENT - DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-dropdown}
+
+There are many different methods that can be used to calculate differential abundance, all with their own advantages and disadvantages. Which method to use depends on the data and therefore I will be using DAtest [@DAtest] as described by [Russel et al. (2018)](https://doi.org/10.1101/241802).
+
+This analysis shows all taxa differing significantly between treatment groups on day 8. This will illustrate mainly differences driven by vancomycin treatment. PFOS driven effects will be explored by subset analyses below. 
+
+### GENUS
+#### SET PARAMETERS
+
+```{r , eval=TRUE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "all"
+PDI <- "treatment"
+SUBNAME <- "Feces_d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+```
+
+#### TEST METHOD
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+# Test best method 
+filt.test <- testDA(filt, predictor = PDI, effectSize = 10) # TIME AND COMPUTAIONALLY DEMANDING STEP
+
+# Evaluate the plot and summary table
+sum.fil <- summary(filt.test)
+write.csv(sum.fil, file = paste0("plots/difabu/",SUBNAME,"/filtersummary_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".csv"))
+p.fil <- plot(filt.test)
+p.fil
+pdf(paste0("plots/difabu/",SUBNAME,"/filterplot_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".pdf"))
+    p.fil
+    dev.off()
+
+```
+
+#### RUN DAtest
+
+Having now identified ANOVA (DA.aoa) as the optimal test for all four treatment groups I will use it to calculate differential abundance. 
+
+```{r , eval=TRUE, echo=TRUE, fig.width=10, fig.height=5}
+# Run the selected analysis
+filt.DA <- DA.aoa(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, color = fct_rev(treatment))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_color_manual(values = params$COL, breaks=c("CTRL","PFOS","VAN","VAN+PFOS")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(color = "Treatment")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",DAY," VAN: ",VAN))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 200, height = 400, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 200, height = 400, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=TRUE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "all"
+PDI <- "treatment"
+SUBNAME <- "Feces_d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.aoa(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, color = fct_rev(treatment))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_color_manual(values = params$COL, breaks=c("CTRL","PFOS","VAN","VAN+PFOS")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(color = "Treatment")
+
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",DAY," VAN: ",VAN))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+## CONCLUSION
+Multiple taxa are significantly differing between treatment groups on day 8, which is expected from the large impact on gram-positive bacteria from vancomycin treatment. Below we will explore the specific PFOS-driven effects on family and genus level.
+
+
+## FECES DAY 8 - NO VANCOMYCIN {.tabset .tabset-fade .tabset-pills}
+This analysis will reveal taxa with significantly differing abundance from PFOS treatment by sub-setting groups not given vancomycin. DA.test will be run to find the best fitted test for comparing two treatment groups.
+
+### GENUS
+#### SET PARAMETERS
+
+```{r , eval=FALSE, echo=FALSE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+SUBNAME <- "Feces_d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+LVL <- "Genus"
+MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "ctrl"
+PDI <- "treatment"
+
+phy.ge <- subset_samples(phy.ge, van == VAN)
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+```
+
+#### TEST METHOD
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+
+# Test best method 
+filt.test <- testDA(filt, predictor = PDI, effectSize = 10) # TIME AND COMPUTAIONALLY DEMANDING STEP
+
+# Evaluate the plot and summary table
+sum.fil <- summary(filt.test)
+write.csv(sum.fil, file = paste0("plots/difabu/",SUBNAME,"/filtersummary_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".csv"))
+p.fil <- plot(filt.test)
+p.fil
+pdf(paste0("plots/difabu/",SUBNAME,"/filterplot_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".pdf"))
+    p.fil
+    dev.off()
+
+```
+
+#### RUN DAtest
+
+Having now identified t-test - ALR (DA.tta, Welch t-test) as the optimal test for analysing two groups I will use it to calculate differential abundance. This test will be applied to following tests of the same form.
+
+```{r , eval=TRUE, echo=TRUE, fig.width=10, fig.height=5, error=TRUE}
+params <- readRDS("R_objects/comp_params.RDS")
+SUBNAME <- "Feces_d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+LVL <- "Genus"
+MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "ctrl"
+PDI <- "treatment"
+
+phy.ge <- subset_samples(phy.ge, van == VAN)
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+if(exists("DA.sig")){
+  # melt the data
+  DAm <- psmelt(DA.sig)
+  
+  # Create plot
+  pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+  p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(treatment))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = params$COL, breaks=c("CTRL","PFOS","VAN","VAN+PFOS")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Treatment")
+  p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",DAY," VAN: ",VAN))
+  p.dT
+  
+  suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",VAN,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+  suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",VAN,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+} else cat("No significantly different taxa identified after adjustment for multiple testing")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=TRUE, echo=TRUE,fig.width=10, fig.height=5, error=TRUE}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "ctrl"
+PDI <- "treatment"
+SUBNAME <- "Feces_d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & day %in% DAY & van == VAN)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+if(exists("DA.sig")){
+  # melt the data
+  DAm <- psmelt(DA.sig)
+  
+  # Create plot
+  pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+  p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(treatment))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = params$COL, breaks=c("CTRL","PFOS","VAN","VAN+PFOS")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Treatment")
+  p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",DAY," VAN: ",VAN))
+  p.dT
+  
+  suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",VAN,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+  suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",VAN,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+} else cat("No significantly different taxa identified after adjustment for multiple testing")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+## CONCLUSION
+No specific genera were found to have significant difference in abundance between the control group and the PFOS exposed group. On family level, 14 families from the Actinobacteria, Firmicutes and Proteobacteria phyla showed significant PFOS-driven difference in abundance. We focus mainly on Genus level on the paper, hence this figure is not included.
+
+## FECES DAY 8 - WITH VANCOMYCIN {.tabset .tabset-fade .tabset-pills}
+This analysis will reveal taxa with significantly differing abundance from PFOS treatment by sub-setting groups not given vancomycin.
+
+### GENUS
+#### RUN DAtest
+
+```{r , eval=TRUE, echo=TRUE,fig.width=10, fig.height=5, error=TRUE}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "van"
+PDI <- "treatment"
+SUBNAME <- "Feces_d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & day %in% DAY & van == VAN)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+if(exists("DA.sig")){
+  # melt the data
+  DAm <- psmelt(DA.sig)
+  
+  # Create plot
+  pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+  p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(treatment))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = params$COL, breaks=c("CTRL","PFOS","VAN","VAN+PFOS")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Treatment")
+  p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",DAY," VAN: ",VAN))
+  p.dT
+  
+  suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",VAN,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+  suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",VAN,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+} else cat("No significantly different taxa identified after adjustment for multiple testing")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=TRUE, echo=TRUE,fig.width=10, fig.height=5, error=TRUE}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "van"
+PDI <- "treatment"
+SUBNAME <- "Feces_d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & day %in% DAY & van == VAN)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",DAY,"_",VAN,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+if(exists("DA.sig")){
+  # melt the data
+  DAm <- psmelt(DA.sig)
+  
+  # Create plot
+  pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+  p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(treatment))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = params$COL, breaks=c("CTRL","PFOS","VAN","VAN+PFOS")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Treatment")
+  p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",DAY," VAN: ",VAN))
+  p.dT
+  
+  suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",VAN,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+  suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",VAN,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+} else cat("No significantly different taxa identified after adjustment for multiple testing")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+## CONCLUSION
+One specific genera, unclassified "Family_Enterobacteriaceae", was found to have significant PFOS-driven difference in abundance between the two vancomycin-treated groups. On family level, no significant PFOS-driven difference in abundance was found. We investigate the Enterobacteriaceae in depts below.
+
+## ENTEROBACTERIACEAE > GENERA
+Significant difference in abundance was found for unclassified genera "Family_Enterobacteriaceae" above. Here we investigate and plot all genera present on day 8 in the family "Enterobacteriaceae".
+``` {r eval=TRUE, echo=TRUE}
+# Collected figures for Families showing significant differences
+params <- readRDS("R_objects/comp_params.RDS")
+LVL <- "Genus"
+# MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "van"
+SUBNAME <- "Feces_d8"
+PDI <- "treatment"
+TX <- "Enterobacteriaceae" 
+#c("Erysipelotrichaceae","Enterobacteriaceae")
+
+LVL <- "Genus"
+# Create sub-folder
+if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+# Load agglomorated subset
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+# Filter samples based on variables given
+#phy.ge <- subset_samples(phy.ge, material == MTRL & day %in% DAY)
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run tha selected analysis TTA
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+filt.t <- subset_taxa(filt.ra, Family == TX)
+
+# Melt the data
+t.melt <- psmelt(filt.t)
+
+# Create pseudocounts
+pseudocount <- min(t.melt$Abundance[t.melt$Abundance != 0])
+
+# Sort samples to phylogenetic levels (alphabetically)
+t.sorted <- t.melt %>% select(Phylum:Genus) %>% arrange(Phylum, Class, Order, Family, Genus)
+genus.sorted <- as.character(unique(t.sorted$Genus))
+t.melt$genus_new <- factor(t.melt$Genus, levels = genus.sorted)
+
+levels(t.melt$genus_new) %>% head
+# Plot data and save as output formats
+p <- ggplot(t.melt, aes(Genus, Abundance+pseudocount, fill = fct_rev(treatment))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = params$COL, breaks=c("CTRL","PFOS","VAN","VAN+PFOS")) + facet_grid(Family ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Treatment")
+p
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",PDI,"_",LVL,"_",TX,".pdf"), p, device = "pdf", units = "mm", width = 200, height = 80, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",PDI,"_",LVL,"_",TX,".png"), p, device = "png", units = "mm", width = 200, height = 80, dpi = 300))
+  
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+## CONCLUSION
+Three genera from the Enterobacteriaceae family are present in the fecal samples for day 8: Salmonella, Escherichia/Shigella and unclassified Family_Enterobacteriaceae. Common trend is lower abundance for all PFOS treated groups, where abundance is significantly and dramatically lower in the Family_Enterobacteriaceae taxon for the vancomycin treated groups.
+
+
+# ANALYSES NOT INCLUDED IN PUBLICATION
+
+Following code chunks have been used in the processing of data but are not used for content of the paper.
+
+# DIFFERENTIAL ABUNDANCE OVER TIME {.tabset .tabset-fade .tabset-dropdown}
+## DAY CTRL TIME TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-dropdown}
+### GENUS
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "CTRL"
+PDI <- "day"
+SUBNAME <- "Feces_CTRL_all"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (grepl("_CTRL",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (grepl("_PFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (grepl("_VANPFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (grepl("_VAN",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.aoa(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "CTRL"
+PDI <- "day"
+SUBNAME <- "Feces_CTRL_all"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (grepl("_CTRL",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (grepl("_PFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (grepl("_VANPFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (grepl("_VAN",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.aoa(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+## DAY PFOS TIME TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+
+
+
+### GENUS
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "PFOS"
+PDI <- "day"
+SUBNAME <- "Feces_PFOS_all"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (grepl("_CTRL",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (grepl("_PFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (grepl("_VANPFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (grepl("_VAN",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+#### RUN DAtest
+# Run the selected analysis
+filt.DA <- DA.aoa(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "PFOS"
+PDI <- "day"
+SUBNAME <- "Feces_PFOS_all"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (grepl("_CTRL",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (grepl("_PFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (grepl("_VANPFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (grepl("_VAN",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.aoc(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+## DAY VAN TIME TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+### GENUS
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "VAN"
+PDI <- "day"
+SUBNAME <- "Feces_VAN_all"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (grepl("_CTRL",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (grepl("_PFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (grepl("_VANPFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (grepl("_VAN",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.aoc(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 500, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 500, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "VAN"
+PDI <- "day"
+SUBNAME <- "Feces_VAN_all"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (grepl("_CTRL",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (grepl("_PFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (grepl("_VANPFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (grepl("_VAN",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.aov(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 500, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 500, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+## DAY VAN+PFOS TIME TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+### GENUS
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "VAN+PFOS"
+PDI <- "day"
+SUBNAME <- "Feces_VANPFOS_all"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (grepl("_CTRL",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (grepl("_PFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (grepl("_VANPFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (grepl("_VAN",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.lao2(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 500, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 500, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "VAN+PFOS"
+PDI <- "day"
+SUBNAME <- "Feces_VANPFOS_all"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (grepl("_CTRL",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (grepl("_PFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (grepl("_VANPFOS",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (grepl("_VAN",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.aov(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 500, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 500, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+# OTHER DIFFERENTIAL ABUNDANCE ANALYSES
+## FECES d08 CTRL TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+
+### GENUS
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "CTRL"
+DAY <- "d0d8"
+PDI <- "day"
+SUBNAME <- "Feces_d0d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 100, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 100, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "CTRL"
+DAY <- "d0d8"
+PDI <- "day"
+SUBNAME <- "Feces_d0d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+## FECES d08 PFOS TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+### GENUS
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "PFOS"
+DAY <- "d0d8"
+PDI <- "day"
+SUBNAME <- "Feces_d0d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 100, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 100, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "PFOS"
+DAY <- "d0d8"
+PDI <- "day"
+SUBNAME <- "Feces_d0d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+## FECES d08 VAN TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+### GENUS
+#### RUN DAtest
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "VAN"
+DAY <- "d0d8"
+PDI <- "day"
+SUBNAME <- "Feces_d0d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 500, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 500, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+
+
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "VAN"
+DAY <- "d0d8"
+PDI <- "day"
+SUBNAME <- "Feces_d0d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+## FECES d08 VAN+PFOS TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+### GENUS
+#### RUN DAtest
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "VAN+PFOS"
+DAY <- "d0d8"
+PDI <- "day"
+SUBNAME <- "Feces_d0d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 500, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 500, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "VAN+PFOS"
+DAY <- "d0d8"
+PDI <- "day"
+SUBNAME <- "Feces_d0d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 350, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 350, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+## FECES d28 VAN TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+### GENUS
+#### RUN DAtest
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "VAN"
+DAY <- "d2d8"
+PDI <- "day"
+SUBNAME <- "Feces_d2d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "VAN"
+DAY <- "d2d8"
+PDI <- "day"
+SUBNAME <- "Feces_d2d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+## FECES d28 VAN+PFOS TEST DIFFERENTIAL ABUNDANCE {.tabset .tabset-fade .tabset-pills}
+### GENUS
+#### RUN DAtest
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+TREAT <- "VAN+PFOS"
+DAY <- "d2d8"
+PDI <- "day"
+SUBNAME <- "Feces_d2d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.tta(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Genus, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 350, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 350, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+### FAMILY
+#### RUN DAtest
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Family"
+MTRL <- "Feces"
+TREAT <- "VAN+PFOS"
+DAY <- "d2d8"
+PDI <- "day"
+SUBNAME <- "Feces_d2d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Color scheme for days
+    if (TREAT == "CTRL") {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+    } else if (TREAT == "PFOS") {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+    } else if (TREAT == "VAN+PFOS") {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+    } else if (TREAT == "VAN") {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+    }
+
+# Create sub-folder
+  if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+
+# Filter samples (if needed)
+phy.fa <- subset_samples(phy.fa, material == MTRL & treatment == TREAT)
+
+# Filter data
+filt <- preDA(data = phy.fa, min.reads = 20, min.samples = 4)
+
+# Run the selected analysis
+filt.DA <- DA.ttc(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/stats_",MTRL,"_",TREAT,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Create plot
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+p.dif <- ggplot(DAm, aes(x = Family, y = Abundance+pseudocount, fill = fct_rev(day))) + geom_boxplot() + scale_y_log10() + coord_flip() + scale_fill_manual(values = COL, breaks=c("d0","d2","d4","d8")) + facet_grid(Phylum ~ . , scales = "free_y", space = "free") + theme_bw() + labs(fill = "Day")
+p.dT <- p.dif + ggtitle(paste0("Differential abundance on ",LVL," level for ",MTRL," ",TREAT))
+p.dT
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".pdf"), p.dif, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/diffplot_",SUBNAME,"_",TREAT,"_",PDI,"_",LVL,".png"), p.dif, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+## Correlation FECES d8 PFOS treated {.tabset .tabset-fade .tabset-pills}
+### GENUS
+#### RUN DAtest
+Note that this following analysis should be run with pval.adj, and not pval.
+```{r , eval=FALSE, echo=TRUE,fig.width=10, fig.height=5}
+params <- readRDS("R_objects/comp_params.RDS")
+
+LVL <- "Genus"
+MTRL <- "Feces"
+PFOS <- "pfos"
+VAN <- "van"            # Also tesing "ctrl"
+DAY <- "d8"
+PDI <- "PFOS_serum8_ug" # Also testing "PFOS_liver_mg"
+SUBNAME <- "Feces_d8"
+load(paste0("R_objects/Agglomerated_",SUBNAME,".RData"))
+
+# Create sub-folder
+if (!file.exists(paste0("plots/difabu/",SUBNAME))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME)))
+if (!file.exists(paste0("plots/difabu/",SUBNAME,"/corr"))) dir.create(file.path(getwd(), paste0("plots/difabu/",SUBNAME,"/corr")))
+
+# Filter samples (if needed)
+phy.ge <- subset_samples(phy.ge, material == MTRL & pfos == PFOS & day == DAY & van == VAN)
+
+# Filter data
+filt <- preDA(data = phy.ge, min.reads = 20, min.samples = 4)
+filt <- transform_sample_counts(filt, function(x) x/sum(x))
+# Run the selected analysis
+filt.DA <- DA.spe(filt, predictor = PDI)
+
+# Evaluate the plot and summary table
+table(filt.DA$pval < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval < 0.05,]
+filt.p5
+write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/corr/stats_",MTRL,"_",PFOS,"_",VAN,"_",DAY,"_",PDI,"_",LVL,".csv"))
+
+# Create a subset of the samples
+filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval < 0.05], x = filt.ra)
+
+# melt the data
+DAm <- psmelt(DA.sig)
+
+# Add pseudo count
+pseudocount <- min(DAm$Abundance[DAm$Abundance != 0])
+
+p.cor <- ggplot(DAm, aes(x = PFOS_liver_mg, y = Abundance+pseudocount, color = Genus)) + 
+  geom_jitter() + 
+  geom_smooth(method=lm) + 
+  facet_wrap("Genus", scales = "free_y") + 
+  scale_y_log10() +
+  scale_x_continuous(breaks = seq(1.717, 2.931, 0.25)) + #liver: 1.717, 2.931, 0.25   Serum: 21.84, 69.92, 10
+  theme_pubr()
+
+p.cor
+
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/corr/Correlation_",SUBNAME,"_",PFOS,"_",VAN,"_",DAY,"_",PDI,"_",LVL,".pdf"), p.cor, device = "pdf", units = "mm", width = 350, height = 200, dpi = 300))
+suppressMessages(ggsave(paste0("plots/difabu/",SUBNAME,"/corr/Correlation_",SUBNAME,"_",PFOS,"_",VAN,"_",DAY,"_",PDI,"_",LVL,".png"), p.cor, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+
+# SETTINGS {.tabset .tabset-fade .tabset-pills}
+
+### EXPLANATION
+
+Overview of the packages that was used for this analysis
+
+### PACKAGES
+
+The analysis was run in R version `getRversion()` using the following packages:
+
+```{r packages, eval=TRUE}
+pack <- data.frame(Package = (.packages()))
+
+for (i in seq(nrow(pack))) pack$Version[i] <- as.character(packageVersion(pack$Package[i]))
+
+kbl(pack[order(pack$Package),], row.names = F) %>% kable_classic(lightable_options = "striped")   
+     
+```
+
+### PARAMETERS
+```{r parameters, eval=TRUE}
+params <- readRDS("R_objects/comp_params.RDS")
+
+dat <- as.data.frame(params)
+
+```
+## References

@@ -1,0 +1,9 @@
+"","Feature","pval","pval.adj","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"1","ASV_0001",3.13512108773222e-05,0.000642699822985106,"ANOVA - CLR (aoc)","Bacteria","Proteobacteria","Gammaproteobacteria","Enterobacterales","Enterobacteriaceae",NA,NA
+"4","ASV_0006",0.000183849339465735,0.00251260763936505,"ANOVA - CLR (aoc)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Lactobacillaceae",NA,NA
+"6","ASV_0009",0.00115639633826079,0.0118530624671731,"ANOVA - CLR (aoc)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae",NA,NA
+"18","ASV_0045",0.00586209409957787,0.0343351225832418,"ANOVA - CLR (aoc)","Bacteria","Firmicutes","Clostridia","Clostridiales","Peptostreptococcaceae",NA,NA
+"19","ASV_0046",0.00685582196836935,0.0351360875878929,"ANOVA - CLR (aoc)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Streptococcaceae",NA,NA
+"25","ASV_0107",0.00299956559063508,0.0245964378432076,"ANOVA - CLR (aoc)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Enterococcaceae",NA,NA
+"34","ASV_0288",0.00426480295953501,0.0291428202234892,"ANOVA - CLR (aoc)","Bacteria","Tenericutes","Mollicutes","Anaeroplasmatales","Anaeroplasmataceae",NA,NA
+"36","ASV_0404",8.54105507593999e-11,3.50183258113540e-09,"ANOVA - CLR (aoc)","Bacteria","Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria","Phylum_Actinobacteria",NA,NA

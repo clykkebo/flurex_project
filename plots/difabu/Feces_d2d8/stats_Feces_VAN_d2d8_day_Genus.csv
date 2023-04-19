@@ -1,0 +1,8 @@
+"","Feature","pval","pval.adj","log2FC","ordering","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"11","ASV_0014",1.34735908239133e-05,0.00034357656600979,3.57386625294345,"d8>d2","t-test - ALR (tta)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Porphyromonadaceae","Parabacteroides",NA
+"31","ASV_0084",3.38381120551212e-09,1.72574371481118e-07,5.76758934181259,"d8>d2","t-test - ALR (tta)","Bacteria","Proteobacteria","Gammaproteobacteria","Enterobacterales","Enterobacteriaceae","Family_Enterobacteriaceae",NA
+"35","ASV_0101",0.000229153847776958,0.00389561541220828,-2.16523218269245,"d2>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Clostridia","Class_Clostridia","Class_Clostridia","Class_Clostridia",NA
+"41","ASV_0122",0.00146173973040085,0.0149097452500887,-3.11464260363353,"d2>d8","t-test - ALR (tta)","Bacteria","Bacteroidetes","Bacteroidia","Bacteroidales","Odoribacteraceae","Odoribacter",NA
+"42","ASV_0135",0.00366265116090489,0.0266850298865927,-1.87921917895998,"d2>d8","t-test - ALR (tta)","Bacteria","Actinobacteria","Coriobacteriia","Eggerthellales","Eggerthellaceae","Family_Eggerthellaceae",NA
+"43","ASV_0181",0.00363021994157141,0.0266850298865927,-2.21794878370104,"d2>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Erysipelotrichia","Erysipelotrichales","Erysipelotrichaceae","Longicatena",NA
+"50","ASV_0288",0.000461237900329579,0.00588078322920213,-2.5316925056547,"d2>d8","t-test - ALR (tta)","Bacteria","Tenericutes","Mollicutes","Anaeroplasmatales","Anaeroplasmataceae","Anaeroplasma",NA

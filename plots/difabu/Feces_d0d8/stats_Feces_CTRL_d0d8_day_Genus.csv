@@ -1,0 +1,2 @@
+"","Feature","pval","pval.adj","log2FC","ordering","Method","Kingdom","Phylum","Class","Order","Family","Genus","Species"
+"4","ASV_0005",0.000362243791039489,0.0322396974025145,-2.58160475023464,"d0>d8","t-test - ALR (tta)","Bacteria","Firmicutes","Bacilli","Lactobacillales","Lactobacillaceae","Ligilactobacillus",NA

@@ -1,0 +1,39 @@
+Analysis of Variance Table
+
+Response: Distances
+          Df   Sum Sq   Mean Sq F value Pr(>F)
+Groups     3 0.004565 0.0015218  0.8502 0.4745
+Residuals 41 0.073385 0.0017899               
+Permutation test for adonis under reduced model
+Terms added sequentially (first to last)
+Permutation: free
+Number of permutations: 9999
+
+adonis2(formula = FORMULA, data = mdat, permutations = 9999, na.action = na.omit)
+          Df SumOfSqs     R2      F Pr(>F)    
+treatment  3   3.5899 0.6323 23.502  1e-04 ***
+Residual  41   2.0876 0.3677                  
+Total     44   5.6776 1.0000                  
+---
+Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+
+***FACTORS:
+
+Centroids:
+                    NMDS1   NMDS2
+treatmentCTRL     -0.3637  0.0000
+treatmentPFOS     -0.3637  0.0000
+treatmentVAN       0.3802  0.0000
+treatmentVAN+PFOS  0.3802  0.0000
+dayd8              0.0000  0.0000
+
+Goodness of fit:
+          r2 Pr(>r)    
+treatment  1  0.001 ***
+day        0  1.000    
+---
+Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
+Permutation: free
+Number of permutations: 999
+
+

@@ -1,0 +1,5112 @@
+---
+title: "Flurex Microbiome Beta Diversity"
+author: "Claus Lykkebo, Martin Steen Mortensen"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    toc_depth: 4
+    collapsed: false
+    code_folding: hide
+    number_sections: true
+knit: (function(inputFile, encoding) { 
+    rmarkdown::render(
+        inputFile, encoding = encoding,
+        output_dir = file.path(dirname(inputFile),"output"),
+        output_file = paste0("Flurex_", Sys.Date(), "_BetaDiversity.html")) 
+    })
+params:
+    input: "R_objects/Phyloseq_15000.Rdata"
+    batch: "run"
+    metrices: ["UniF","Bray"] # To run weighted unifrac and jaccard add the following to brackets: "WUF","Jaccard"
+---
+
+# BETA DIVERSITY
+
+This Rmarkdown contains the commands necessary to perform beta diversity analysis of the output from the DF_GMH_PIPELINE. It is expected that the data has been imported, cleaned, and saved following the script 1_Import_QC.Rmd prior to using this script. I recommend visiting the ["Analysis of community ecology data in R"](https://www.davidzeleny.net/anadat-r/doku.php/en:start) to read about the theory behind the alpha and beta diversity and examples of the necessary R-code to execute them. Other excellent source of help is the R [cheat-sheets](https://www.rstudio.com/resources/cheatsheets/) and for problems related to Rmarkdown I suggest this [online Book](https://bookdown.org/yihui/rmarkdown/).
+
+**Beta diversity**, also called "between sample diversity" is a measurement of the distance, or difference, between samples. First step will be to calculate the beta diversity, second to identify batch effects, and lastly to determine project effects
+
+# INFO
+
+This document has been fitted to perform beta diversity calculations of phyloseq element from the Import & QC script. It has been fitted for data from Flurex (internal project name: R20-22). The project data contains 16S V3 amplicon sequencing from feces samples from 4 different days and cecum and ileum samples from one day from 48 rats. There are feces samples from all rats from day 0, 2, 4 and 8. Cecum and ileum samples were all collected at dissection on day 8. Please read the method section for this paper for details on experimental setup.
+
+Metadata contains sample information regarding: 
+-   rat number/name, cage number (rats were co-caged 2-2), day of sampling, material (feces, cecum, ileum), sequencing information (gram of material used for extracted DNA, DNA concentrations, primers, barcodes for demultiplexing, batch number ("run" = c2, c3, c4)), treatment groups. Several columns have been created for easy sample grouping during analysis, including for distinguishing between vancomycin and PFOS treatment alone.
+
+Metadata contains results from:
+-   Bodyweight per sampling day, while cecum and liver weight for day 8 (addition column with organ weights normalised to bodyweight).
+
+-   PFOS quantification of:
+    +   Blood serum from day 4 and 8 measured in µg/mL
+    +   Liver tissue from day 8 measured in mg PFOS in full liver weight
+-   Short-chain fatty acids quantification of 10 compounds in colonic water given in mM from day 8: acetic acid, formic acid, propanoic acid, 2methyl-propanoic acid, butanoic acid, 3methyl-butanoic acid, pentanoic acid, 4methyl-pentanoic acid, hexanoic acid and heptanoic acid
+
+
+```{r setup, eval=TRUE, echo=TRUE, message=FALSE,warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries
+library(tidyverse)
+library(phyloseq)
+library(ggpubr)
+library(rstatix)
+library(vegan)
+library(ape)
+library(kableExtra)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(ggExtra)
+
+# Create used folders if missing
+if (!file.exists("R_objects")) dir.create(file.path(getwd(), "R_objects"))
+if (!file.exists("plots")) dir.create(file.path(getwd(), "plots"))
+if (!file.exists("plots/bdiv")) dir.create(file.path(getwd(), "plots/bdiv"))
+if (!file.exists("tables")) dir.create(file.path(getwd(), "tables"))
+if (!file.exists("scripts")) dir.create(file.path(getwd(), "scripts"))
+
+# Save params
+saveRDS(params, file = "R_Objects/bdiv_params.RDS")
+```
+
+## SCRIPTS {.tabset .tabset-fade .tabset-pills}
+
+
+This section contains the scripts for the custom functions used in this pipeline
+
+### MULTIPLE RAREFY
+
+Here is a function that rarefies each sample of a phyloseq object, calculates the distance between them, and chooses the most central as a representative sample for any following analyses.
+
+```{r multiple_rarefy_function, eval=TRUE}
+multiple_rarefy <- function(physeq, ntables=100, depth = min(rowSums(rawtab))*0.9, distmethod="bray", summarymeasure=mean, seedstart=500, verbose=TRUE) {
+  require("vegan")
+  # Orientate the OTU correctly
+  if (taxa_are_rows(physeq)){rawtab<-unclass(t(otu_table(physeq)))} else rawtab <- unclass(otu_table(physeq))
+  
+  # Ignore samples below rarefaction depth
+  ind <- (rowSums(rawtab) < depth)
+  sam.discard <- rownames(rawtab)[ind]
+  otu.tab <- rawtab[!ind, ]
+  
+  # Rarefaction function
+  rarefy <- function(x, depth) {
+    y <- sample(rep(1:length(x), x), depth)
+    y.tab <- table(y)
+    j <- numeric(length(x))
+    j[as.numeric(names(y.tab))] <- y.tab
+    j
+  }
+  
+  # Table to output rarefied data
+  final_tab = c()
+  
+  # Run each sample separately
+  for (z in 1:nrow(otu.tab)) {
+    if (verbose==TRUE) {
+      print(paste("Rarefaction sample number", z, sep=" "))
+    }
+    numbers <- otu.tab[z,]
+    
+    # Rarefy the sample ntables times
+    set.seed(seedstart + z)
+    rare_tab <- lapply(1:ntables,function(k) rarefy(numbers,depth))
+    
+    rare_tab <- do.call(rbind, rare_tab)
+    # # Remove columns with no reads
+    # rare_tab_no_zero <- rare_tab[,colSums(rare_tab) != 0]
+    # # distance across reps for subject z
+    distmat = as.matrix(vegdist(rare_tab, method=distmethod)) 
+    # calculate mean distance for each rep 
+    distsummary = apply(distmat, 2, summarymeasure)
+    # the best rep is the one with the mean distance to all other reps. (in case of ties, just select the first)
+    whichbestrep = which(distsummary == min(distsummary))[1]  
+    # select that rep only for subject z
+    bestrep = rare_tab[whichbestrep,]
+    # build that rep for subject y into final table
+    final_tab = rbind(final_tab, bestrep) 
+  }
+  
+  # Remove samples with too few reads
+  physeq <- prune_samples(!sample_names(physeq) %in% sam.discard, physeq) 
+  # Reformat final tab and return to the physeq object
+  rownames(final_tab) = rownames(otu.tab)
+  colnames(final_tab) = colnames(otu.tab)
+  otu_table(physeq) <- otu_table(t(final_tab), taxa_are_rows = T)
+  
+  # Return physeq to the environment
+  return(physeq)
+}
+
+# save functions
+save(multiple_rarefy, file = "scripts/mrarefy.Rdata")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
+invisible(gc()) #free up memory and report the memory usage.
+
+```
+
+## CALCULATE BETA DIVERSITY {.tabset .tabset-fade .tabset-pills}
+
+I will calculate for both weighted UniFrac distances and Bray-Curtis dissimilarity index. Both indeces normalises pairwise distances/dissimilarities to be between 0 and 1, which means that while the distance between two samples will always be the same, the numerical value will depend on all the samples analysed together. Other metrics/indeces can be used, and might be relevant, but just keep in mind how the specific indeces are relevant for the interpretation of the following results.
+
+### CREATE RAREFIED PHYLOSEQ OBJECT
+
+Most beta diversity metrics that are based on presence/absence of bacteria are sensitive to differences in sequencing depth. The way to minimize such bias is to perform rarefaction of the data, but as rarefaction is random this introduces yet another bias. Here we will rarefy each sample multiple times and choose the most central as a representative rarefication.
+
+```{r calc_multiple_rarefy, eval=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+load("scripts/mrarefy.Rdata")
+
+# Load phyloseq
+load(params$input)
+
+# Perform multiple rarefactions
+phy.rare <- multiple_rarefy(phy)
+
+# Remove empty taxa
+phy.rare <- prune_taxa(taxa_sums(phy.rare) > 0, phy.rare)
+
+# Root tree
+phy_tree(phy) <- ape::root(phy_tree(phy), sample(taxa_names(phy), 1), resolve.root = TRUE)
+
+# Save object
+save(phy.rare, file = "R_objects/Phyloseq_rarefied.Rdata")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
+invisible(gc()) #free up memory and report the memory usage.
+```
+
+### UNWEIGHTED UNIFRAC
+
+The unique fraction metric, or UniFrac, measures the phylogenetic distance between sets of taxa in a phylogenetic tree as the fraction of the branch length of the tree that leads to descendants from either one environment or the other, but not both [(Lozupone & Knight, 2005)](https://doi.org/10.1128/AEM.71.12.8228-8235.2005). 
+This metric is sensitive to sequencing depth, so it is required to use a rarefied phyloseq object
+The UniFrac algorithm requires a rooted tree, so if ASVs has been removed from the raw da the tree should be rerooted manually, else a random ASV will be chosen as root.
+
+```{r calc_UniF, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("scripts/mrarefy.Rdata")
+
+# Root tree if necessary
+if (!is.rooted(phy_tree(phy.rare))) phy_tree(phy.rare) <- ape::root(phy_tree(phy.rare), sample(taxa_names(phy.rare), 1), resolve.root = TRUE)
+
+# Calculate UniFrac distances
+unif.dist <- UniFrac(phy.rare, weighted = FALSE, parallel = FALSE)
+
+# Calculate PCoA data
+unif.pcoa <- ordinate(phy.rare, method = "PCoA",distance = unif.dist)
+unif.nmds <- metaMDS(unif.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(unif.dist, unif.nmds, unif.pcoa, file = "R_objects/UniF.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+#### SUBSETS
+##### Feces
+```{r calc_UniF_subs_F0248, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day %in% c("d0","d2","d4","d8"))
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f0248.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F0, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f0.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F2, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f2.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F4, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f4.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F08, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day %in% c("d0","d8"))
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f08.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+##### Feces, Cecum, Ileum
+```{r calc_UniF_subs_FCEIL8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.fceil8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+```{r calc_UniF_subs_CE8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8" & material == "Cecum")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.ce8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_IL8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8" & material == "Ileum")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.il8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+
+##### Feces non-Vancomycin and Vancomycin
+
+```{r calc_UniF_subs_F0_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f0_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F0_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f0_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_UniF_subs_F2_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f2_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F2_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f2_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_UniF_subs_F4_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f4_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F4_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f4_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_UniF_subs_F8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_F8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.f8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+##### Cecum & Ileum non-Vancomycin and Vancomycin
+```{r calc_UniF_subs_CE8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Cecum" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.ce8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_CE8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Cecum" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.ce8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_IL8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Ileum" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.il8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_IL8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Ileum" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.il8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+
+##### Feces diversity over time
+
+```{r calc_UniF_subs_Feces_d0248_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "CTRL") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.feces_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_Feces_d0248_pfos, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "PFOS") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.feces_pfos.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_Feces_d0248_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "VAN") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.feces_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_UniF_subs_Feces_d0248_vanpfos, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+tmp.dist <- as.matrix(unif.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "VAN+PFOS") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+unif.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+unif.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = unif.sub.dist)
+unif.sub.nmds <- metaMDS(unif.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, unif.sub.dist, unif.sub.nmds, unif.sub.pcoa, file = "R_objects/unif.sub.feces_vanpfos.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+
+
+### WEIGHTED UNIFRAC
+
+The unique fraction metric, or UniFrac, measures the phylogenetic distance between sets of taxa in a phylogenetic tree as the fraction of the branch length of the tree that leads to descendants from either one environment or the other, but not both [(Lozupone & Knight, 2005)](https://doi.org/10.1128/AEM.71.12.8228-8235.2005). 
+Weighted UniFrac takes the abundance of each ASV into account instead of just presence/absence, which means that it will not be sensitive to sequencing depth. The UniFrac algorithm requires a rooted tree, so if ASVs has been removed from the raw da the tree should be rerooted manually, else a random ASV will be chosen as root.
+
+```{r calc_wUniF, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load(params$input)
+
+# Root tree if necessary
+if (!is.rooted(phy_tree(phy))) phy_tree(phy) <- ape::root(phy_tree(phy), sample(taxa_names(phy), 1), resolve.root = TRUE)
+
+# Calculate UniFrac distances
+wuf.dist <- UniFrac(phy, weighted = TRUE, parallel = FALSE)
+
+# Calculate PCoA data
+wuf.pcoa <- ordinate(phy, method = "PCoA",distance = wuf.dist)
+wuf.nmds <- metaMDS(wuf.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(wuf.dist, wuf.nmds, wuf.pcoa, file = "R_objects/wuf.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+#### SUBSETS
+##### Feces
+```{r calc_wUniF_subs_F0248, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day %in% c("d0","d2","d4","d8"))
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f0248.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F0, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f0.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F2, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f2.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F4, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f4.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F08, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day %in% c("d0","d8"))
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f08.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+##### Feces, Cecum, Ileum
+```{r calc_wUniF_subs_FCEIL8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.fceil8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_CE8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8" & material == "Cecum")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.ce8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_il8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8" & material == "Ileum")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.il8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+##### Feces non-Vancomycin and Vancomycin
+
+```{r calc_wUniF_subs_F0_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f0_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F0_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f0_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_wUniF_subs_F2_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f2_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F2_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f2_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_wUniF_subs_F4_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f4_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F4_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f4_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_wUniF_subs_F8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_F8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.f8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+##### Cecum & Ileum non-Vancomycin and Vancomycin
+```{r calc_wUniF_subs_CE8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Cecum" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.ce8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_CE8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Cecum" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.ce8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_IL8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Ileum" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.il8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_IL8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Ileum" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.il8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+
+##### Feces diversity over time
+
+```{r calc_wUniF_subs_Feces_d0248_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "CTRL") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.feces_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_Feces_d0248_pfos, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "PFOS") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.feces_pfos.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_Feces_d0248_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "VAN") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.feces_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_wUniF_subs_Feces_d0248_vanpfos, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/wuf.RData")
+
+tmp.dist <- as.matrix(wuf.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "VAN+PFOS") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+wuf.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUniFrac distances
+
+# Calculate PCoA data
+wuf.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = wuf.sub.dist)
+wuf.sub.nmds <- metaMDS(wuf.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa, file = "R_objects/wuf.sub.feces_vanpfos.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+
+
+
+
+
+### BRAY-CURTIS
+
+Bray-Curtis dissimilarity index (as implemented by the vegan package) is the sum of abundance difference for each species/ASV, divided by theoretical maximum difference between the samples if no ASV overlapped. The formula used is: $$d_{jk} = \frac{\sum|n_{ij}-n_{ik}|}{\sum(n_{ij}+n_{ik})}$$ Bray-Curtis dissimilarity is not a true distance metric as it does not adhere to the [triangle inequality](), but is often used to compare microbiomes. Bray-Curtis dissimilarities are based on the assumption that measurements are taken from equal areas, so differences in total counts between samples will bias the metric. As differences in sequences depth is due to differences in the lab procedures and not biological differences, we should transform our counts to relative abundances before calculating Bray-Curtis dissimilarities. By transforming the data to abundances no data is lost, but rarefied data can also be used.
+
+```{r calc_bray, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load(params$input)
+
+# transform counts to relative abundance
+phy.ra <- transform_sample_counts(phy, function(x) x/sum(x))
+
+# Calculate Bray-Curtis dissimilarities
+bray.dist <- distance(phy.ra, method = "bray",)
+
+# Calculate PCoA data
+bray.pcoa <- ordinate(phy, method = "PCoA",distance = bray.dist)
+bray.nmds <- metaMDS(bray.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(bray.dist, bray.nmds, bray.pcoa, file = "R_objects/Bray.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+#### SUBSETS
+##### Feces
+```{r calc_Bray_subs_F0248, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day %in% c("d0","d2","d4","d8"))
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f0248.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F0, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f0.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F2, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f2.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F4, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f4.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F08, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day %in% c("d0","d8"))
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f08.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+##### Feces, Cecum, Ileum
+```{r calc_Bray_subs_FCEIL8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.fceil8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_CE8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8" & material == "Cecum")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.ce8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_IL8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8" & material == "Ileum")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.il8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+##### Feces non-Vancomycin and Vancomycin
+
+```{r calc_Bray_subs_F0_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f0_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F0_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f0_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_Bray_subs_F2_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f2_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F2_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f2_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_Bray_subs_F4_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f4_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F4_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f4_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_Bray_subs_F8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_F8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.f8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+##### Cecum & Ileum non-Vancomycin and Vancomycin
+```{r calc_Bray_subs_CE8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Cecum" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.ce8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_CE8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Cecum" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.ce8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_IL8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Ileum" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.il8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_IL8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Ileum" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.il8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+
+##### Feces diversity over time
+
+```{r calc_Bray_subs_Feces_d0248_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "CTRL") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.feces_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_Feces_d0248_pfos, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "PFOS") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.feces_pfos.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_Feces_d0248_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "VAN") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.feces_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Bray_subs_Feces_d0248_vanpfos, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/Bray.RData")
+
+tmp.dist <- as.matrix(bray.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "VAN+PFOS") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+bray.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Brayrac distances
+
+# Calculate PCoA data
+bray.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = bray.sub.dist)
+bray.sub.nmds <- metaMDS(bray.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, bray.sub.dist, bray.sub.nmds, bray.sub.pcoa, file = "R_objects/bray.sub.feces_vanpfos.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+### JACCARD
+
+``` {r }
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load(params$input)
+
+# transform counts
+phy.ra <- transform_sample_counts(phy, function(x) x/sum(x))
+
+# Calculate Jaccard distances
+jac.dist <- distance(phy.ra, method = "jaccard", binary = TRUE)
+
+# Calculate PCoA data
+jac.pcoa <- ordinate(phy, method = "PCoA",distance = jac.dist)
+jac.nmds <- metaMDS(jac.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(jac.dist, jac.nmds, jac.pcoa, file = "R_objects/jac.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+```
+
+#### SUBSETS
+##### Feces
+```{r calc_Jac_subs_F0248, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day %in% c("d0","d2","d4","d8"))
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate UniFrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f0248.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F0, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f0.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F2, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f2.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F4, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f4.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F08, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day %in% c("d0","d8"))
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f08.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+##### Feces, Cecum, Ileum
+```{r calc_Jac_subs_FCEIL8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.fceil8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_CE8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8" & material == "Cecum")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.ce8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_IL8, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, day == "d8" & material == "Ileum")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate wUnifrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.il8.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+##### Feces non-Vancomycin and Vancomycin
+
+```{r calc_Jac_subs_F0_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f0_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F0_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d0" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f0_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_Jac_subs_F2_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f2_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F2_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d2" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f2_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_Jac_subs_F4_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f4_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F4_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d4" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f4_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+```{r calc_Jac_subs_F8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_F8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.f8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+##### Cecum & Ileum non-Vancomycin and Vancomycin
+```{r calc_Jac_subs_CE8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Cecum" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.ce8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_CE8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Cecum" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.ce8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_IL8_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Ileum" & day == "d8" & van == "ctrl")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.il8_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_IL8_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Ileum" & day == "d8" & van == "van")
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.il8_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+
+##### Feces diversity over time
+
+```{r calc_Jac_subs_Feces_d0248_ctrl, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "CTRL") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.feces_ctrl.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_Feces_d0248_pfos, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "PFOS") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.feces_pfos.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_Feces_d0248_van, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "VAN") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.feces_van.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+```{r calc_Jac_subs_Feces_d0248_vanpfos, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/jac.RData")
+
+tmp.dist <- as.matrix(jac.dist)
+# Create subset
+phy.sub <- subset_samples(phy.rare, material == "Feces" & treatment == "VAN+PFOS") 
+
+SUBS <- sample_names(phy.sub)
+
+tmp.sub.dist <- tmp.dist[SUBS, SUBS]
+jac.sub.dist <- as.dist(tmp.sub.dist,diag = TRUE, upper = TRUE)
+
+# Calculate Jacrac distances
+
+# Calculate PCoA data
+jac.sub.pcoa <- ordinate(phy.sub, method = "PCoA",distance = jac.sub.dist)
+jac.sub.nmds <- metaMDS(jac.sub.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(phy.sub, jac.sub.dist, jac.sub.nmds, jac.sub.pcoa, file = "R_objects/jac.sub.feces_vanpfos.RData")
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE))
+invisible(gc())
+
+```
+
+
+## BATCH EFFECTS {.tabset .tabset-fade .tabset-pills}
+
+For the beta diversity we will also have to test for batch effects, and if they are significant, correct for them when performing the project relevant analyses.
+I will test each diversity index individually, so if additional indeces have been included, just copy and and adapt the following sections. Additional tests only including feces samples.
+
+### UNIFRAC
+
+```{r batch_UniF, eval=TRUE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load("R_objects/Phyloseq_rarefied.Rdata")
+load("R_objects/UniF.RData")
+
+# Extract metadata from phyloseq
+mdat <- data.frame(sample_data(phy.rare))
+
+# Run PERMANOVA for batch variable
+FORMULA <- as.formula(paste("unif.dist ~ ", params$batch, sep = ""))
+batch.PERM <- adonis2(FORMULA, data = mdat)
+
+# Compare the betadiversity dispertion for the batch variable
+batch.bdisp <- betadisper(unif.dist, mdat[,params$batch])
+anova(batch.bdisp)
+
+# If significant a post hoc test can compare pairwise
+TukeyHSD(batch.bdisp)
+
+plot(batch.bdisp)
+boxplot(batch.bdisp)
+
+# Subset for Feces
+sub.phy <- subset_samples(phy.rare, material == "Feces")
+mdat <- data.frame(sample_data(sub.phy))
+load("R_objects/unif.sub.f0248.RData")
+
+# Run PERMANOVA for batches only with Feces samples
+FORMULA <- as.formula(paste("unif.sub.dist ~ ", params$batch, sep = ""))
+batch.PERM <- adonis2(FORMULA, data = mdat)
+
+# Compare the betadiversity dispertion for the batch variable
+batch.bdisp <- betadisper(unif.sub.dist, mdat[,params$batch])
+anova(batch.bdisp)
+
+# If significant a post hoc test can compare pairwise
+TukeyHSD(batch.bdisp)
+
+plot(batch.bdisp)
+boxplot(batch.bdisp)
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+Batch effect is observed between c2 and other two batches, as can be expected from difference in material origin (feces vs. cecum and ileum). Significant batch effect is observed between c3-c4 in unweighted UniFrac which should be taken into account in analysis between fecal samples over days d0/d8 to d2/d4. Due to the distribution of samples over batches, a difference is  expected as the number of samples reflecting vancomycin treatment were different between the batches (higher portion of samples not exposed to vancomycin in c4).
+
+
+### WEIGHTED UNIFRAC
+
+```{r batch_WUF, eval=TRUE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load(params$input)
+load("R_objects/wuf.RData")
+
+# Extract metadata from phyloseq
+mdat <- data.frame(sample_data(phy))
+
+# Run PERMANOVA for batch variable
+FORMULA <- as.formula(paste("wuf.dist ~ ", params$batch, sep = ""))
+batch.PERM <- adonis2(FORMULA, data = mdat)
+
+# Compare the betadiversity dispertion for the batch variable
+batch.bdisp <- betadisper(wuf.dist, mdat[,params$batch])
+anova(batch.bdisp)
+
+# If significant a post hoc test can compare pairwise
+TukeyHSD(batch.bdisp)
+
+plot(batch.bdisp)
+boxplot(batch.bdisp)
+
+# Subset for Feces
+sub.phy <- subset_samples(phy, material == "Feces")
+mdat <- data.frame(sample_data(sub.phy))
+load("R_objects/wuf.sub.f0248.RData")
+
+# Run PERMANOVA for batches only with Feces samples
+FORMULA <- as.formula(paste("wuf.sub.dist ~ ", params$batch, sep = ""))
+batch.PERM <- adonis2(FORMULA, data = mdat)
+
+# Compare the betadiversity dispertion for the batch variable
+batch.bdisp <- betadisper(wuf.sub.dist, mdat[,params$batch])
+anova(batch.bdisp)
+
+# If significant a post hoc test can compare pairwise
+TukeyHSD(batch.bdisp)
+
+plot(batch.bdisp)
+boxplot(batch.bdisp)
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+Batch effect is observed between c2 and other two batches, as can be expected from difference in material origin (feces vs. cecum and ileum). No batch effect is found between c3-c4 for weighted UniFrac.
+
+### BRAY-CURTIS
+
+```{r batch_Bray, eval=TRUE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load(params$input)
+load("R_objects/Bray.RData")
+
+# Extract metadata from phyloseq
+mdat <- data.frame(sample_data(phy))
+
+# Run PERMANOVA for batch variable
+FORMULA <- as.formula(paste("bray.dist ~ ", params$batch, sep = ""))
+batch.PERM <- adonis2(FORMULA, data = mdat)
+
+# Compare the betadiversity dispertion for the batch variable
+batch.bdisp <- betadisper(bray.dist, mdat[,params$batch])
+anova(batch.bdisp)
+
+# If significant a post hoc test can compare pairwise
+TukeyHSD(batch.bdisp)
+
+plot(batch.bdisp)
+boxplot(batch.bdisp)
+
+# Subset for Feces
+sub.phy <- subset_samples(phy, material == "Feces")
+mdat <- data.frame(sample_data(sub.phy))
+load("R_objects/bray.sub.f0248.RData")
+
+# Run PERMANOVA for batches only with Feces samples
+FORMULA <- as.formula(paste("bray.sub.dist ~ ", params$batch, sep = ""))
+batch.PERM <- adonis2(FORMULA, data = mdat)
+
+# Compare the betadiversity dispertion for the batch variable
+batch.bdisp <- betadisper(bray.sub.dist, mdat[,params$batch])
+anova(batch.bdisp)
+
+# If significant a post hoc test can compare pairwise
+TukeyHSD(batch.bdisp)
+
+plot(batch.bdisp)
+boxplot(batch.bdisp)
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+Batch effect is observed between c2 and other two batches, as can be expected from difference in material origin (feces vs. cecum and ileum). No batch effect is found between c3-c4 for Bray-Curtis.
+
+### JACCARD
+
+```{r batch_Jac, eval=TRUE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# load
+load(params$input)
+load("R_objects/jac.RData")
+
+# Extract metadata from phyloseq
+mdat <- data.frame(sample_data(phy))
+
+# Run PERMANOVA for batch variable
+FORMULA <- as.formula(paste("jac.dist ~ ", params$batch, sep = ""))
+batch.PERM <- adonis2(FORMULA, data = mdat)
+
+# Compare the betadiversity dispertion for the batch variable
+batch.bdisp <- betadisper(jac.dist, mdat[,params$batch])
+anova(batch.bdisp)
+
+# If significant a post hoc test can compare pairwise
+TukeyHSD(batch.bdisp)
+
+plot(batch.bdisp)
+boxplot(batch.bdisp)
+
+# Subset for Feces
+sub.phy <- subset_samples(phy, material == "Feces")
+mdat <- data.frame(sample_data(sub.phy))
+load("R_objects/jac.sub.f0248.RData")
+
+# Run PERMANOVA for batches only with Feces samples
+FORMULA <- as.formula(paste("jac.sub.dist ~ ", params$batch, sep = ""))
+batch.PERM <- adonis2(FORMULA, data = mdat)
+
+# Compare the betadiversity dispertion for the batch variable
+batch.bdisp <- betadisper(jac.sub.dist, mdat[,params$batch])
+anova(batch.bdisp)
+
+# If significant a post hoc test can compare pairwise
+TukeyHSD(batch.bdisp)
+
+plot(batch.bdisp)
+boxplot(batch.bdisp)
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+Batch effect is observed between c2 and other two batches, as can be expected from difference in material origin (feces vs. cecum and ileum). Significant batch effect is observed between c3-c4 in Jaccard which should be taken into account in analysis between fecal samples over days d0/d8 to d2/d4. Due to the distribution of samples over batches, a difference is expected as the number of samples reflecting vancomycin treatment were different between the batches (higher portion of samples not exposed to vancomycin in c4).
+
+### OVERALL INTERPRETATION
+
+There were significant batch dependent differences in beta diversity in all investigated metrices, which need to be considered for further analysis. Due to sequencial run of samples batches the sample distribution for samples are not uniformly randomized on all three batches, rather the "c2" contains only samples from ileum and cecum luminal content, while "c3" and "c4" contains fecal samples of day 2-4 and day 0+8, respectively. This should be taken into account when comparing data between day 0 or 8 with day 2 or 4.  Also, comparison with ileal and cecal samples should be weighted against this. Due to the distribution of samples over batches, a difference is expected as the number of samples reflecting vancomycin treatment were different between the batches c3 and c4 (higher portion of samples not exposed to vancomycin in c4).
+
+
+# GROUP-WISE TREATMENT - CATEGORICAL VARIABLES EFFECTS {.tabset .tabset-fade .tabset-pills}
+
+In this first section (MANUAL) individual variables and metrices can be tested and plotted manually.
+In the second following section (PCOA ITERATIONS) all calculated iterations created during subsetting are analysed to create principal coordinate analyses through a for-loop created to select for appropriate variables and color-schemes for each iteration.
+
+## MANUAL
+This first part loads the data and defines beta-diversity metric and tested variable for the following. Function ggExtra::ggMarginal is used for marginal boxplots for axis 1 and axis 2.
+**OBS** NMDS has been removed/silenced in the script below
+
+```{r , eval=TRUE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+
+# Choose metric
+METRIC <- "Bray"     # Metric for analysis: "Bray", "UniF", "WUF", "Jaccard"
+# Choose variable 
+VAR <- "treatment"   # Categorical factor - main
+VAR2 <- "day"        # Categorical factor 2
+DAY <- "d8"          # Values for "day": "d0", "d2", "d4", "d8"
+MTRL <- "Feces"      # Materials: "Feces", "Cecum", "Ileum"
+VAN <- "van"         # Variable for without and with vancomycin treatment: ctrl and van. Should be removed for test on all four treatment groups.
+SUBNAME <- "f8_van"  # Subname should match the filename format for iterations used above: { METRIC.sub.SUBNAME.RData }
+# Color scheme
+COL <-  c("CTRL" = "#606060","PFOS" = "#31b44b","VAN" = "#6699d1","VAN+PFOS" = "#efc000")
+
+# Create subfolder if needed
+sub.dir <- paste0("plots/bdiv_manual/beta_",SUBNAME)
+if (!file.exists(sub.dir)) dir.create(file.path(getwd(), sub.dir))
+sdir <- paste0(sub.dir,"/")
+
+# Load data based on METRIC
+load(params$input)
+
+if (METRIC == "UniF") {
+  filename <- paste0("R_objects/unif.sub.",SUBNAME,".RData")
+  load(filename)
+  dist.used <- unif.sub.dist
+  nmds.used <- unif.sub.nmds
+  pcoa.used <- unif.sub.pcoa
+  rm(unif.sub.dist, unif.sub.nmds, unif.sub.pcoa)
+} else if (METRIC == "WUF") {
+  filename <- paste0("R_objects/wuf.sub.",SUBNAME,".RData")
+  load(filename)
+  dist.used <- wuf.sub.dist
+  nmds.used <- wuf.sub.nmds
+  pcoa.used <- wuf.sub.pcoa
+  rm(wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa)
+} else if (METRIC == "Bray"){
+  filename <- paste0("R_objects/bray.sub.",SUBNAME,".RData")
+  load(filename)
+  dist.used <- bray.sub.dist
+  nmds.used <- bray.sub.nmds
+  pcoa.used <- bray.sub.pcoa
+  rm(bray.sub.dist, bray.sub.nmds, bray.sub.pcoa)
+} else if (METRIC == "Jaccard"){
+  filename <- paste0("R_objects/jac.sub.",SUBNAME,".RData")
+  load(filename)
+  dist.used <- jac.sub.dist
+  nmds.used <- jac.sub.nmds
+  pcoa.used <- jac.sub.pcoa
+  rm(jac.sub.dist, jac.sub.nmds, jac.sub.pcoa)
+}
+
+# Extract metadata from phyloseq
+mdat <- data.frame(sample_data(phy.sub))
+
+# Subset the metadata based on the above
+mdat <- mdat[mdat$day == DAY & mdat$material == MTRL,]
+
+# If a variable consist of numbers, but represent distinct groups remember to make it into a factor
+mdat[,VAR] <- as.factor(mdat[,VAR])
+
+## STATISTICAL TEST
+# Compare the betadiversity dispertion for Weighted UniFrac
+bdisp <- betadisper(dist.used, mdat[,VAR], bias.adjust=TRUE)
+test.anova <- anova(bdisp)
+test.anova
+
+# dispertion by group
+b.title <- paste0(METRIC," ",SUBNAME)
+p.bdisp <- boxplot(bdisp, main = b.title)
+
+
+# Test which groups differ (only if the anova test was significant)
+(HSD <- TukeyHSD(bdisp))
+p.HSD <- plot(HSD)
+
+# Run PERMANOVA for the variable
+FORMULA <- as.formula(paste("dist.used ~", VAR, sep = " "))
+(perm.test <- adonis2(FORMULA, data = mdat, permutations = 9999,na.action = na.omit))
+FORMULA2 <- as.formula(paste("dist.used ~", "pfos", sep = " "))
+(perm.test2 <- adonis2(FORMULA2, data = mdat, permutations = 9999,na.action = na.omit))
+# Use vegan to test how well metadata fits ordination
+fit.out <- envfit(nmds.used, mdat[,c(VAR,VAR2)],na.rm=TRUE)
+fit.out
+
+# ### EIGENVALUES
+# For PCoA each axis represent a specific amount of the overall variation in the dataset. this information can easily be extracted and plotted.
+
+# Extract eigen values
+eigen <- pcoa.used$values
+eigen$Axis <- as.numeric(row.names(eigen))
+
+# Create plots for both distance indeces
+p.eigen <- ggplot(eigen[1:10,], aes(x = as.factor(Axis), y = 100*Rel_corr_eig)) + 
+  geom_col(aes(fill = as.factor(Axis))) +
+  geom_point(aes(x = Axis, y = 100*Cum_corr_eig)) +
+  geom_line(aes(x = Axis, y = 100*Cum_corr_eig)) +
+  ylab("Variance explained (%)") +
+  xlab("Axis") +
+  theme_pubr(legend = "none") + ggsci::scale_fill_jco()
+p.eigen + ggtitle(paste("Variance per axis for", METRIC, sep = " "))
+suppressMessages(ggsave(plot = p.eigen, filename = paste0(sdir,"bdiv_eigen_",METRIC,"_",SUBNAME,".png"), device = "png"))
+suppressMessages(ggsave(plot = p.eigen, filename = paste0(sdir,"bdiv_eigen_",METRIC,"_",SUBNAME,".pdf"), device = "pdf"))
+
+### ORDINATION
+
+# Phyloseq has a plotting function, but it is a bit limited in some of the settings. Therefore, I recommend to use the function to create a table of the data and then make your own plots
+# The first plot highlights the location of each group on the first 5 axis. Based on this an optimal set of axis can be chosen for the following ordination plot.
+
+# Create plots of eigenvalues for PCoA plots
+pcoa.tab <- plot_ordination(phy, pcoa.used,axes = 1:5,justDF = TRUE)
+nmds.tab <- plot_ordination(phy, nmds.used,axes = 1:5,justDF = TRUE)
+
+# Reformat tables to create one common table
+colnames(nmds.tab)[1:5] <- c("Axis.1","Axis.2","Axis.3","Axis.4","Axis.5")
+
+nmds.tab$ordination <- "nmds"
+pcoa.tab$ordination <- "pcoa"
+
+ord.tab <- rbind(nmds.tab,pcoa.tab)
+ord.tab$treatment <- as.factor(ord.tab$treatment)
+
+# Melt axis to be in one variable
+axis.tab <- pivot_longer(data = ord.tab, cols = c("Axis.1","Axis.2","Axis.3","Axis.4","Axis.5"), names_to = "Axis", values_to = "position")
+
+# Plot positions on axes
+plot.pos <- ggplot(axis.tab, aes_string(x = "ordination", y = "position", fill = VAR)) +
+  geom_boxplot() +
+  facet_grid(Axis~.) +
+  coord_flip() + 
+  theme_pubr(legend = "bottom") + ggsci::scale_fill_jco()
+TITLE <- paste0(METRIC," - Axis effect: ",MTRL," ","day ",DAY)
+plot.pos2 <- print(plot.pos + ggtitle(TITLE))
+plot.pos2
+suppressMessages(ggsave(plot = plot.pos2, filename = paste0(sdir,"bdiv_axis_effect_",METRIC,"_",SUBNAME,".png"), device = "png"))
+suppressMessages(ggsave(plot = plot.pos2, filename = paste0(sdir,"bdiv_axis_effect_",METRIC,"_",SUBNAME,".pdf"), device = "pdf"))
+
+# Create PCoA plot
+p <- ggplot(ord.tab[ord.tab$ordination == "pcoa",], aes_string(x = "Axis.1", y = "Axis.2", color = VAR, fill = VAR, group = VAR))
+p <- p + geom_vline(xintercept = c(0), color = "grey70", alpha = 0.6, linetype = 1, linewidth = 0.5) +
+  geom_hline(yintercept = c(0), color = "grey70", alpha = 0.6, linetype = 1, linewidth = 0.5) +
+  geom_point() +
+  theme_pubr(legend = "bottom") +
+  labs(color=VAR) +
+  stat_ellipse(geom = "polygon", alpha = 0.1) +
+  scale_color_manual(values = COL) +
+  scale_fill_manual(values = COL) +
+  border(color = "black",size = 0.5) +
+  labs(color = "Treatment") +
+  guides(fill = "none")
+p.pcoa <- ggExtra::ggMarginal(p = p, type = 'boxplot', size = 10, groupFill = TRUE)
+p.pcoa
+
+# Save plot
+plotfile <- file.path("plots/bdiv",paste0("bdiv_ordination_",VAR,".png"))
+ggsave(filename = plotfile, plot = p.pcoa, width = 150, height = 150, device = "png", units = "mm",dpi = 300)
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+
+## ALL PCOA ITERATIONS {.tabset .tabset-fade .tabset-pills}
+For-loop setup to generate analysis and PCoA visualization for all listed iterations. Eigenvalue plot is excluded from the loop due to constant errors related to calculations of "Rel_corr_eig". Function ggExtra::ggMarginal is used for marginal boxplots for axis 1 and axis 2.
+**OBS** NMDS has been removed/silenced in the script below
+
+```{r , eval=TRUE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+# Default variables
+VAR <- "treatment"
+VAR2 <- "day"
+# Default color scheme for treatment groups 
+COL <-  c("CTRL" = "#606060","PFOS" = "#31b44b","VAN" = "#6699d1","VAN+PFOS" = "#efc000")
+
+# Create string of iterations based on subsets created above = SUBNAME
+str.subnameT<- c("feces_ctrl","feces_pfos","feces_van","feces_vanpfos",
+                 "f0","f0_ctrl","f0_van","f2","f2_ctrl","f2_van",
+                 "f4","f4_ctrl","f4_van",
+                 "f8","f8_ctrl","f8_van",
+                 "il8","il8_ctrl","il8_van",
+                 "ce8","ce8_ctrl","ce8_van",
+                 "f08","f0248")
+
+# Determine variables for sub-setting and naming the run
+for (SUBNAME in str.subnameT) {
+  VAR <- "treatment"
+  VAR2 <- "day"
+  COL <-  c("CTRL" = "#606060","PFOS" = "#31b44b","VAN" = "#6699d1","VAN+PFOS" = "#efc000")
+  print(paste0("Processing ",SUBNAME,"..."))
+  if (grepl("feces_",SUBNAME) == TRUE) {
+    MTRL <- "Feces"
+    MN <- MTRL
+    VAR <- "day"
+    VAR2 <- "treatment"
+    DAY <- c("d0","d2","d4","d8")
+    dn <- "All days"
+  } else if (grepl("fceil",SUBNAME) == TRUE) {
+    MTRL <- c("Feces","Cecum","Ileum")
+    MN <- "All materials"
+    VAR <- "material"
+    VAR2 <- "treatment"
+    COL <- c("Feces" = "#cd534c","Cecum" = "#efc000","Ileum" = "#0073c2")
+  } else if (grepl("f",SUBNAME) == TRUE) {
+    MTRL <- "Feces"
+    MN <- MTRL
+  } else if (grepl("ce",SUBNAME) == TRUE) {
+    MTRL <- "Cecum"
+    MN <- MTRL
+  } else if (grepl("il",SUBNAME) == TRUE) {
+    MTRL <- "Ileum"
+    MN <- MTRL
+  }
+  if (grepl("feces_",SUBNAME) == TRUE) {
+    if (grepl("_ctrl",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#a0a0a0","d2" = "#808080","d4" = "#606060","d8" = "#494949")
+      print("Treatment sorting. No vancomycin definition needed")
+    } else if (grepl("_pfos",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#48ff62","d2" = "#45ce4b","d4" = "#31b44b","d8" = "#278937")
+      print("Treatment sorting. No vancomycin definition needed")
+    } else if (grepl("_vanpfos",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#f7e789","d2" = "#f7e054","d4" = "#fcdd05","d8" = "#c4a110")
+      print("Treatment sorting. No vancomycin definition needed")
+    } else if (grepl("_van",SUBNAME) == TRUE) {
+      COL <- c("d0" = "#8bd2fc","d2" = "#81c3ea","d4" = "#6699d1","d8" = "#487baa")
+      print("Treatment sorting. No vancomycin definition needed")
+    }
+  } else if (grepl("ctrl", SUBNAME) == TRUE) {
+    STA <- "ctrl"
+  } else if (grepl("van", SUBNAME) == TRUE) {
+    STA <- "van"
+  } else {
+  }
+  if (grepl("0248",SUBNAME) == TRUE) {
+    DAY <- c("d0","d2","d4","d8")
+    dn <- "All days"
+  } else if (grepl("08",SUBNAME) == TRUE) {
+    DAY <- c("d0","d8")
+    dn <- "Day 0 + 8"
+  } else if (grepl("0", SUBNAME) == TRUE) {
+    DAY <- "d0"
+    dn <- "Day 0"
+  } else if (grepl("2", SUBNAME) == TRUE) {
+    DAY <- "d2"
+    dn <- "Day 2"
+  } else if (grepl("4", SUBNAME) == TRUE) {
+    DAY <- "d4"
+    dn <- "Day 4"
+  } else if (grepl("8", SUBNAME) == TRUE) {
+    DAY <- "d8"
+    dn <- "Day 8"
+  }
+
+  sub.dir <- paste0("plots/bdiv/beta_",SUBNAME)
+  if (!file.exists(sub.dir)) dir.create(file.path(getwd(), sub.dir))
+  sdir <- paste0(sub.dir,"/")
+
+  for (METRIC in params$metrices) {
+  # Load data
+    print(paste0("Processing ",SUBNAME," in ",METRIC,"..."))
+    load(params$input)
+    #METRIC <- "UniF"
+    if (METRIC == "UniF") {
+      filename <- paste0("R_objects/unif.sub.",SUBNAME,".RData")
+      load(filename)
+      dist.used <- unif.sub.dist
+      nmds.used <- unif.sub.nmds
+      pcoa.used <- unif.sub.pcoa
+      rm(unif.sub.dist, unif.sub.nmds, unif.sub.pcoa)
+    } else if (METRIC == "WUF") {
+      filename <- paste0("R_objects/wuf.sub.",SUBNAME,".RData")
+      load(filename)
+      dist.used <- wuf.sub.dist
+      nmds.used <- wuf.sub.nmds
+      pcoa.used <- wuf.sub.pcoa
+      rm(wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa)
+    } else if (METRIC == "Bray"){
+      filename <- paste0("R_objects/bray.sub.",SUBNAME,".RData")
+      load(filename)
+      dist.used <- bray.sub.dist
+      nmds.used <- bray.sub.nmds
+      pcoa.used <- bray.sub.pcoa
+      rm(bray.sub.dist, bray.sub.nmds, bray.sub.pcoa)
+    } else if (METRIC == "Jaccard"){
+      filename <- paste0("R_objects/jac.sub.",SUBNAME,".RData")
+      load(filename)
+      dist.used <- jac.sub.dist
+      nmds.used <- jac.sub.nmds
+      pcoa.used <- jac.sub.pcoa
+      rm(jac.sub.dist, jac.sub.nmds, jac.sub.pcoa)
+    }
+    
+    # Extract metadata from phyloseq
+    mdat <- data.frame(sample_data(phy.sub))
+    
+    # Subset the metadata based on the above
+    if (grepl("feces_",SUBNAME) == TRUE) {
+      mdat <- mdat[mdat$day %in% DAY & mdat$material %in% MTRL,]
+    } else if (grepl("_",SUBNAME) == FALSE) {
+      mdat <- mdat[mdat$day %in% DAY & mdat$material %in% MTRL,]
+    } else {
+      mdat <- mdat[mdat$day %in% DAY & mdat$material %in% MTRL & mdat$van %in% STA,]
+    }
+    
+    # If a variable consist of numbers, but represent distinct groups remember to make it into a factor
+    mdat[,VAR] <- as.factor(mdat[,VAR])
+    
+    ## STATISTICAL TEST
+    # Compare the betadiversity dispertion for Weighted UniFrac
+    bdisp <- betadisper(dist.used, mdat[,VAR], bias.adjust=TRUE)
+    test.anova <- anova(bdisp)
+    test.anova
+    
+    # dispertion by group
+    b.title <- paste0(METRIC," ",SUBNAME)
+    p.bdisp <- boxplot(bdisp, main = b.title)
+    
+    png(file = paste0(sdir,"bdiv_bdisp_boxplot_",METRIC,"_",SUBNAME,".png"))
+    boxplot(bdisp, main = b.title)
+    dev.off()
+    
+    # Test which groups differ (only if the anova test was significant)
+    (HSD <- TukeyHSD(bdisp))
+    p.HSD <- plot(HSD)
+    
+    png(file = paste0(sdir,"bdiv_bdisp_HSD_",METRIC,"_",SUBNAME,".png"))
+    plot(HSD)
+    dev.off()
+    
+    # Run PERMANOVA for the variable
+    FORMULA <- as.formula(paste("dist.used ~", VAR, sep = " "))
+    (perm.test <- adonis2(FORMULA, data = mdat, permutations = 9999,na.action = na.omit))
+    
+    # Use vegan to test how well metadata fits ordination
+    fit.out <- envfit(nmds.used, mdat[,c(VAR,VAR2)],na.rm=TRUE)
+    fit.out
+    
+    stat.out <- paste0(sdir,"bdiv_bdisp_",METRIC,"_",SUBNAME,".txt")
+    sink(stat.out)
+    print(test.anova)
+    print(perm.test)
+    print(fit.out)
+    sink()
+    
+    ### ORDINATION
+    # Create plots of eigenvalues for PCoA plots
+    pcoa.tab <- plot_ordination(phy, pcoa.used,axes = 1:5,justDF = TRUE)
+    #nmds.tab <- plot_ordination(phy, nmds.used,axes = 1:5,justDF = TRUE)
+    
+    # Reformat tables to create one common table
+    #colnames(nmds.tab)[1:5] <- c("Axis.1","Axis.2","Axis.3","Axis.4","Axis.5")
+    
+    #nmds.tab$ordination <- "nmds"
+    pcoa.tab$ordination <- "pcoa"
+    
+    ord.tab <- rbind(pcoa.tab) #nmds.tab,
+    ord.tab$treatment <- as.factor(ord.tab$treatment)
+    
+    # Melt axis to be in one variable
+    axis.tab <- pivot_longer(data = ord.tab, cols = c("Axis.1","Axis.2","Axis.3","Axis.4","Axis.5"), names_to = "Axis", values_to = "position")
+    
+    # Plot positions on axes
+    plot.pos <- ggplot(axis.tab, aes_string(x = "ordination", y = "position", fill = VAR)) +
+      geom_boxplot() +
+      facet_grid(Axis~.) +
+      coord_flip() + 
+      theme_pubr(legend = "bottom") + scale_fill_manual(values = COL)#ggsci::scale_fill_jco()
+    plot.posT <- plot.pos + ggtitle(paste0(METRIC," - Axis effect: ",MN," ",dn))
+    suppressMessages(ggsave(plot = plot.posT, filename = paste0(sdir,"bdiv_axis_effect_",METRIC,"_",SUBNAME,".png"), device = "png", units = "mm", width = 200, height = 100, dpi = 300))
+    suppressMessages(ggsave(plot = plot.posT, filename = paste0(sdir,"bdiv_axis_effect_",METRIC,"_",SUBNAME,".pdf"), device = "pdf", units = "mm", width = 200, height = 100, dpi = 300))
+    
+    # Create ordination plots
+    p <- ggplot(ord.tab[ord.tab$ordination == "pcoa",], aes_string(x = "Axis.1", y = "Axis.2", color = VAR, fill = VAR, group = VAR))
+    p <- p + 
+      #geom_vline(xintercept = c(0), color = "grey70", alpha = 0.4, linetype = 1, linewidth = 0.5) +
+      #geom_hline(yintercept = c(0), color = "grey70", alpha = 0.4, linetype = 1, linewidth = 0.5) +
+      geom_point() +
+      theme_pubr(legend = "bottom") +
+      labs(color=VAR) +
+      stat_ellipse(geom = "polygon", alpha = 0.1) +
+      scale_color_manual(values = COL) +
+      scale_fill_manual(values = COL) +
+      border(color = "black",size = 0.5) +
+      labs(color = "Treatment") +
+      guides(fill = "none")
+    plot.beta <- ggExtra::ggMarginal(p = p, type = 'boxplot', size = 10, groupFill = TRUE)
+      
+    suppressMessages(ggsave(filename = paste0(sdir,"bdiv_PCoA_",METRIC,"_",SUBNAME,".png"), plot.beta, device = "png", units = "mm", width = 150, height = 150, dpi = 300))
+    suppressMessages(ggsave(filename = paste0(sdir,"bdiv_PCoA_",METRIC,"_",SUBNAME,".pdf"), plot.beta, device = "pdf", units = "mm", width = 150, height = 150, dpi = 300))
+
+  message(paste0("Finished processing ",SUBNAME," without issues. Moving on..."))
+  } 
+  # clear the environment and release memory except variables used for next run
+  rm(list = ls(all.names = TRUE)[!ls(all.names = TRUE) %in% c("params","VAR","VAR2","str.subnameT","COL")])
+  invisible(gc())
+}
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+```
+
+# PERMANOVA
+In this section the contribution of categorical values for treatment ("pfos" and "van" = vancomycin) to beta diversity distances for each metric is tested using PERMANOVA test (vegan::adonis2). Tests for each sampling day are tested and for subsets based on vancomycin treatment.
+
+## PERMANOVA FECES DAY 0
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Feces"
+DAY <- "Day 0"
+
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f0"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d0",]
+perm.unif <- adonis2(unif.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f0"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d0",]
+perm.wuf <- adonis2(wuf.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f0"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d0",]
+perm.bray <- adonis2(bray.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f0"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d0",]
+perm.jac <- adonis2(jac.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.jac
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA FECES DAY 2
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Feces"
+DAY <- "Day 2"
+
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f2"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2",]
+perm.unif <- adonis2(unif.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f2"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2",]
+perm.wuf <- adonis2(wuf.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f2"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2",]
+perm.bray <- adonis2(bray.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f2"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2",]
+perm.jac <- adonis2(jac.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.jac
+
+as.data.frame(perm.unif)["pfos","Pr(>F)"]
+coef <- coefficients(perm.unif)["",]
+
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA FECES day 2 CTRL & VAN
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Feces"
+DAY <- "Day 2"
+VAN <- "no vancomycin"
+
+# No vancomycin treatment
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f2_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2" & dat$van == "ctrl",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f2_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2" & dat$van == "ctrl",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f2_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2" & dat$van == "ctrl",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f2_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2" & dat$van == "ctrl",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+message("")
+# With vancomycin treatment
+VAN <- "vancomycin"
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f2_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2" & dat$van == "van",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f2_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2" & dat$van == "van",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f2_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2" & dat$van == "van",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f2_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d2" & dat$van == "van",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA FECES DAY 4
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Feces"
+DAY <- "Day 4"
+
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f4"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4",]
+perm.unif <- adonis2(unif.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f4"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4",]
+perm.wuf <- adonis2(wuf.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f4"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4",]
+perm.bray <- adonis2(bray.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f4"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4",]
+perm.jac <- adonis2(jac.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.jac
+
+as.data.frame(perm.unif)["pfos","Pr(>F)"]
+coef <- coefficients(perm.unif)["",]
+
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA FECES day 4 CTRL & VAN
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Feces"
+DAY <- "Day 4"
+VAN <- "no vancomycin"
+
+# No vancomycin treatment
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f4_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4" & dat$van == "ctrl",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f4_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4" & dat$van == "ctrl",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f4_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4" & dat$van == "ctrl",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f4_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4" & dat$van == "ctrl",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+message("")
+# With vancomycin treatment
+VAN <- "vancomycin"
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f4_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4" & dat$van == "van",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f4_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4" & dat$van == "van",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f4_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4" & dat$van == "van",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f4_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d4" & dat$van == "van",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA FECES DAY 8
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Feces"
+DAY <- "Day 8"
+
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8",]
+perm.unif <- adonis2(unif.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8",]
+perm.wuf <- adonis2(wuf.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8",]
+perm.bray <- adonis2(bray.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8",]
+perm.jac <- adonis2(jac.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.jac
+
+as.data.frame(perm.unif)["pfos","Pr(>F)"]
+coef <- coefficients(perm.unif)["",]
+
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA FECES day 8 CTRL & VAN
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Feces"
+DAY <- "Day 8"
+VAN <- "no vancomycin"
+
+# No vancomycin treatment
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8" & dat$van == "ctrl",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8" & dat$van == "ctrl",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8" & dat$van == "ctrl",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8" & dat$van == "ctrl",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+message("")
+# With vancomycin treatment
+VAN <- "vancomycin"
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.f8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8" & dat$van == "van",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.f8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8" & dat$van == "van",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.f8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8" & dat$van == "van",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.f8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Feces" & dat$day == "d8" & dat$van == "van",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA CECUM DAY 8
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Cecum"
+DAY <- "Day 8"
+
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.ce8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8",]
+perm.unif <- adonis2(unif.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.ce8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8",]
+perm.wuf <- adonis2(wuf.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.ce8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8",]
+perm.bray <- adonis2(bray.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.ce8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8",]
+perm.jac <- adonis2(jac.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.jac
+
+as.data.frame(perm.unif)["pfos","Pr(>F)"]
+coef <- coefficients(perm.unif)["",]
+
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA CECUM DAY 8 CTRL & VAN
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Cecum"
+DAY <- "Day 8"
+VAN <- "no vancomycin"
+
+# No vancomycin treatment
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.ce8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8" & dat$van == "ctrl",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.ce8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8" & dat$van == "ctrl",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.ce8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8" & dat$van == "ctrl",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.ce8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8" & dat$van == "ctrl",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+message("")
+# With vancomycin treatment
+VAN <- "vancomycin"
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.ce8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8" & dat$van == "van",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.ce8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8" & dat$van == "van",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.ce8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8" & dat$van == "van",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.ce8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Cecum" & dat$day == "d8" & dat$van == "van",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA ILEUM DAY 8
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Ileum"
+DAY <- "Day 8"
+
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.il8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8",]
+perm.unif <- adonis2(unif.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.il8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8",]
+perm.wuf <- adonis2(wuf.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.il8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8",]
+perm.bray <- adonis2(bray.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.il8"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8",]
+perm.jac <- adonis2(jac.sub.dist ~ van*pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY))
+perm.jac
+
+as.data.frame(perm.unif)["pfos","Pr(>F)"]
+coef <- coefficients(perm.unif)["",]
+
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+## PERMANOVA ILEUM DAY 8 CTRL & VAN
+``` {r , eval=TRUE, echo=TRUE}
+MTRL <- "Ileum"
+DAY <- "Day 8"
+VAN <- "no vancomycin"
+
+# No vancomycin treatment
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.il8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8" & dat$van == "ctrl",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.il8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8" & dat$van == "ctrl",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.il8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8" & dat$van == "ctrl",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.il8_ctrl"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8" & dat$van == "ctrl",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+message("")
+# With vancomycin treatment
+VAN <- "vancomycin"
+message(paste0("PERMANOVA distance test for PFOS effect on ",MTRL," ",DAY," with ",VAN))
+# UniF
+METRIC <- "UniF"
+SUBNAME <- "unif.sub.il8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8" & dat$van == "van",]
+perm.unif <- adonis2(unif.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.unif
+message("")
+# WUF
+METRIC <- "WUF"
+SUBNAME <- "wuf.sub.il8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8" & dat$van == "van",]
+perm.wuf <- adonis2(wuf.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.wuf
+message("")
+# BRAY
+METRIC <- "Bray"
+SUBNAME <- "bray.sub.il8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8" & dat$van == "van",]
+perm.bray <- adonis2(bray.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.bray
+message("")
+# Jaccard
+METRIC <- "Jaccard"
+SUBNAME <- "jac.sub.il8_van"
+load(paste0("R_objects/",SUBNAME,".RData"))
+load(params$input)
+
+dat <- data.frame(sample_data(phy))
+dat <- dat[dat$material == "Ileum" & dat$day == "d8" & dat$van == "van",]
+perm.jac <- adonis2(jac.sub.dist ~ pfos, data = dat, permutations = 9999, na.action = na.omit)
+message(paste0("PERMANOVA on ",METRIC,": ",MTRL," ",DAY," ",VAN))
+perm.jac
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+
+# ANALYSES NOT INCLUDED IN PUBLICATION
+
+Following code chunks have been used in the processing of data but are not used for content of the paper.
+
+## DISTANCE COMPARISON BOXPLOTS
+Section under development for creating a statistic and visual for distance differences between treatment groups or days for each iteration created above. First section is a manual setup followed by a section with a for-loop generating plots for each iteration listed.
+THIS SECTION SHOULD MOST LIKELY BE DELETED FROM FINAL SCRIPT.
+``` {r beta_boxplots_bray, eval=F, echo=T}
+params <- readRDS("R_objects/bdiv_params.RDS")
+load("R_objects/Phyloseq_rarefied.RData")
+# load(params$input)
+METRIC <- "Bray"
+SUBNAME <- "f8_van"
+MTRL <- "Feces"
+DAY <- "d8"
+VAN <- "van"
+
+COL <- c("#606060","#31b44b")
+
+# SUBSET
+phy.sub <- subset_samples(phy.rare, material == MTRL & day %in% DAY & van == VAN)
+
+# Transform original data
+phy.rl <- transform_sample_counts(phy.sub, function(x) x/sum(x))
+phy.rl
+head(otu_table(phy.rl)[,1:6])
+bray.dist <- distance(phy.rl, method = "bray",)
+
+# Create matrix from distances
+bray.m <- melt(as.matrix(bray.dist))
+bray.m
+
+# Remove self-comparisons
+bray.m <- bray.m %>%
+  filter(as.character(Var1) != as.character(Var2)) %>%
+  mutate_if(is.factor,as.character)
+bray.m
+
+# Get sample data
+sd <- data.frame(sample_data(phy.rl))
+sd <- sd %>%
+select(ID, treatment) %>%
+mutate_if(is.factor,as.character)
+sd
+
+# Combine distances with sample data
+colnames(sd) <- c("Var1","Treat1")
+bray.sd <- left_join(bray.m, sd, by = "Var1")
+
+colnames(sd) <- c("Var2","Treat2")
+bray.sd <- left_join(bray.sd,sd,by = "Var2")
+
+#bray.sd$group <- paste(bray.sd$Treat1, bray.sd$Treat2, sep = "_")
+bray.sd
+
+write.csv(file = paste0("output/bdiv_comparison_boxplot_",MTRL,"_",DAY,"_",VAN,"_",METRIC,"_.csv"),bray.sd)
+
+# Create boxplot
+p <- ggplot(bray.sd, aes(x = Treat2, y = value)) +
+  theme_bw() +
+  geom_boxplot(aes(color = ifelse(Treat1 == Treat2, "red", "black"))) +
+  geom_point(position = position_jitter(height = 0.2,width = 0.2)) +
+  scale_color_identity() +
+  facet_wrap(~ Treat1, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ggtitle(paste0("Distance metric = ",METRIC)) +
+  labs(x ="Treatment",y="Distance")
+p
+#p.stat <- p + stat_pvalue_manual(stat.sig, label = "p.adj.format",tip.length = 0)
+
+suppressMessages(ggsave(filename = paste0("plots/bdiv/beta_",SUBNAME,"/",METRIC,"_boxplot_",SUBNAME,".png"), p, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)[ls(all.names = TRUE) != "params"])
+invisible(gc())
+
+```
+
+## DISTANCE COMPARISON ALL
+``` {r beta_boxplots_all, eval=FALSE, echo=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+
+str.subnameT<- c("feces_ctrl","feces_pfos","feces_van","feces_vanpfos",
+                 "f0","f0_ctrl","f0_van","f2","f2_ctrl","f2_van",
+                 "f4","f4_ctrl","f4_van",
+                 "f8","f8_ctrl","f8_van",
+                 "il8","il8_ctrl","il8_van",
+                 "ce8","ce8_ctrl","ce8_van",
+                 "f08","f0248","fceil8")
+
+for (SUBNAME in str.subnameT) {
+  for (METRIC in params$metrices) {
+  # Load data
+    load(params$input)
+    #METRIC <- "UniF"
+    if (METRIC == "UniF") {
+      filename <- paste0("R_objects/unif.sub.",SUBNAME,".RData")
+      load(filename)
+      dist.used <- unif.sub.dist
+      nmds.used <- unif.sub.nmds
+      pcoa.used <- unif.sub.pcoa
+      rm(unif.sub.dist, unif.sub.nmds, unif.sub.pcoa)
+    } else if (METRIC == "WUF") {
+      filename <- paste0("R_objects/wuf.sub.",SUBNAME,".RData")
+      load(filename)
+      dist.used <- wuf.sub.dist
+      nmds.used <- wuf.sub.nmds
+      pcoa.used <- wuf.sub.pcoa
+      rm(wuf.sub.dist, wuf.sub.nmds, wuf.sub.pcoa)
+    } else if (METRIC == "Bray"){
+      filename <- paste0("R_objects/bray.sub.",SUBNAME,".RData")
+      load(filename)
+      dist.used <- bray.sub.dist
+      nmds.used <- bray.sub.nmds
+      pcoa.used <- bray.sub.pcoa
+      rm(bray.sub.dist, bray.sub.nmds, bray.sub.pcoa)
+    } else if (METRIC == "Jaccard"){
+      filename <- paste0("R_objects/jac.sub.",SUBNAME,".RData")
+      load(filename)
+      dist.used <- jac.sub.dist
+      nmds.used <- jac.sub.nmds
+      pcoa.used <- jac.sub.pcoa
+      rm(jac.sub.dist, jac.sub.nmds, jac.sub.pcoa)
+    }
+load("R_objects/Bray.RData")
+load(params$input)
+METRIC <- "Bray"
+# Transform original data
+phy.ra <- transform_sample_counts(phy, function(x) x/sum(x))
+phy.ra
+head(otu_table(phy.ra)[,1:6])
+bray.dist <- distance(phy.ra, method = "bray",)
+# Create matrix from distances
+bray.mtx <- melt(as.matrix(bray.dist))
+bray.mtx
+
+# Remove self-comparisons
+bray.mtx <- bray.mtx %>%
+  filter(as.character(Var1) != as.character(Var2)) %>%
+  mutate_if(is.factor,as.character)
+bray.mtx
+
+# Get sample data
+sd <- data.frame(sample_data(phy))
+sd <- sd %>%
+select (ID, treatment) %>%
+mutate_if(is.factor,as.character)
+
+# Combine distances with sample data
+colnames(sd) <- c("Var1","Type1")
+bray.sd <- left_join(bray.mtx, sd, by = "Var1")
+
+colnames(sd) <- c("Var2","Type2")
+bray.sd <- left_join(bray.sd,sd,by = "Var2")
+
+write.csv(file = "output/bdiv_comparison_boxplot.csv",bray.sd)
+
+# Create boxplot
+bdiv.comp <- ggplot(bray.sd, aes(x = Type2, y = value)) +
+  theme_bw() +
+  geom_point() +
+  geom_boxplot(aes(color = ifelse(Type1 == Type2, "red", "black"))) +
+  scale_color_identity() +
+  facet_wrap(~ Type1, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ggtitle(paste0("Distance metric = ",METRIC))
+
+suppressMessages(ggsave(filename = paste0("plots/bdiv/",SUBNAME,"/",METRIC,"_boxplot_",SUBNAME,".png"), bdiv.comp, device = "png", units = "mm", width = 350, height = 200, dpi = 300))
+}
+
+```
+
+# SETTINGS {.tabset .tabset-fade .tabset-pills}
+
+Overview of the parameters and packages that were used for this analysis
+
+## PARAMETERS
+
+The following paramenters were set in for this analysis:
+
+```{r parameters, eval=TRUE}
+params <- readRDS("R_objects/bdiv_params.RDS")
+
+tmp <- unlist(params)
+dat <- data.frame(Parameter = names(tmp), Value = unname(tmp))
+
+
+kbl(dat, row.names = F) %>% kable_classic(lightable_options = "striped")
+
+```
+
+## PACKAGES
+
+The analysis was run in R version `r getRversion()` using the following packages:
+
+```{r packages, eval=TRUE}
+pack <- data.frame(Package = (.packages()))
+
+for (i in seq(nrow(pack))) pack$Version[i] <- as.character(packageVersion(pack$Package[i]))
+
+kbl(pack[order(pack$Package),], row.names = F) %>% kable_classic(lightable_options = "striped")   
+     
+```
