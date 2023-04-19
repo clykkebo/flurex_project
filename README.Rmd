@@ -17,10 +17,20 @@ Metadata contains results from:
 - Bodyweight per sampling day, while cecum and liver weight for day 8 (addition column with organ weights normalised to bodyweight).
 
 - PFOS quantification of:
-  - Blood serum from day 4 and 8 measured in µg/mL
-  - Liver tissue from day 8 measured in mg PFOS in full liver weight
+  + Blood serum from day 4 and 8 measured in µg/mL
+  + Liver tissue from day 8 measured in mg PFOS in full liver weight
 
-- Short-chain fatty acids quantification of 10 compounds in colonic water given in mM from day 8: acetic acid, formic acid, propanoic acid, 2methyl-propanoic acid, butanoic acid, 3methyl-butanoic acid, pentanoic acid, 4methyl-pentanoic acid, hexanoic acid and heptanoic acid
+- Short-chain fatty acids quantification of 10 compounds in colonic water given in mM from day 8:
+  + formic acid (formate), 
+  + acetic acid (acetate), 
+  + propanoic acid (propionate), 
+  + 2-methyl-propanoic acid (isobutyrate), 
+  + butanoic acid (butyrate), 
+  + 3-methyl-butanoic acid (isovalerate), 
+  + pentanoic acid (valerate), 
+  + 4-methyl-pentanoic acid (isocaproate), 
+  + hexanoic acid (coproate) and 
+  + heptanoic acid (enanthate).
 
 ## Content
 
@@ -34,3 +44,4 @@ Analyses should be run in the order given by the numbering of the Rmarkdown docu
   3. 03_BetaDiversity.Rmd (Beta diversity calculations)
   4. 04_Differential_abundance.Rmd (Differential abundance calculations)
   5. 05_Microbiome_description_feces.Rmd (Overview of relative abundances)
+  6. 06_Animal_data.Rmd
