@@ -1969,14 +1969,14 @@ filt <- transform_sample_counts(filt, function(x) x/sum(x))
 filt.DA <- DA.spe(filt, predictor = PDI)
 
 # Evaluate the plot and summary table
-table(filt.DA$pval < 0.05)
-filt.p5 <- filt.DA[filt.DA$pval < 0.05,]
+table(filt.DA$pval.adj < 0.05)
+filt.p5 <- filt.DA[filt.DA$pval.adj < 0.05,]
 filt.p5
 write.csv(filt.p5,paste0("plots/difabu/",SUBNAME,"/corr/stats_",MTRL,"_",PFOS,"_",VAN,"_",DAY,"_",PDI,"_",LVL,".csv"))
 
 # Create a subset of the samples
 filt.ra <- transform_sample_counts(filt, function(x) x/sum(x)*100)
-DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval < 0.05], x = filt.ra)
+DA.sig <- prune_taxa(filt.DA$Feature[filt.DA$pval.adj < 0.05], x = filt.ra)
 
 # melt the data
 DAm <- psmelt(DA.sig)

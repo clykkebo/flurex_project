@@ -29,14 +29,26 @@ This document contains the commands necessary to analyse experimental data obtai
   + total dosed PFOS per rat on day 4 and 8 respectively (mg)
   + blood day 4 and 8 in ug PFOS/mL serum including calculations on
     + total blood volume per animal based on an standard average of 64mL blood / kilogram in rats ["Diehl et al. 2001"]("https://doi.org/10.1002/jat.727")
+    + concentrations of PFOS on each day (ug/mL)
     + total PFOS in blood volume (mg)
     + total PFOS detected in blood from total dosed per day (pct)
   + liver from dissection on day 8 in ug PFOS/g tissue including calculations on
-    + total pfos in liver per rat (mg)
+    + total PFOS in liver per rat 
+    + concentration of PFOS (ug/mL)
     + total PFOS detected in liver from total dosed on day 8 (pct)
+  + isomer proportions of branched and linear PFOS presented as branched-linear ratio (bl-ratio)
 
 - Short-chain fatty acids quantification of 10 compounds in colonic water given in mM from day 8:
-  + acetic acid, formic acid, propanoic acid, 2-methyl-propanoic acid, butanoic acid, 3-methyl-butanoic acid, pentanoic acid, 4-methyl-pentanoic acid, hexanoic acid and heptanoic acid
+  + acetic acid (acetate)
+  + formic acid (formate)
+  + propanoic acid (propionate)
+  + 2-methyl-propanoic acid (isobutyrate)
+  + butanoic acid (butyrate)
+  + 3-methyl-butanoic acid (isovalerate)
+  + pentanoic acid (valerate)
+  + 4-methyl-pentanoic acid (isocaproate)
+  + hexanoic acid (caproate)
+  + heptanoic acid (enanthate)
 
 # Setup 
 Following code loads packages, creates necessary folder and saves parameters for the following analyses.
@@ -59,6 +71,10 @@ library(dplyr)
 library(tidyr)
 library(ggplot2)
 library(ggbreak)
+library(ggrepel)
+library(DAtest)
+library(cowplot)
+library(pheatmap)
 
 # Create used folders if missing
 if (!file.exists("R_objects")) dir.create(file.path(getwd(), "R_objects"))
@@ -265,6 +281,182 @@ invisible(gc()) #free up memory and report the memory usage.
 ```
 
 ![Body weight gain from day 0 to day 8](plots/animal_data/weight/bw_gain_plot.png){width="100%"}
+## Cecum weight (grams)
+This section will prepare to perform the data analysis for cecum weight data in grams
+
+### Statistics
+#### **Prepare data**
+
+This section sets the variables to be used and prepares the data if necessary.
+
+```{r, eval=TRUE}
+# load data 
+load("R_objects/animal_data.Rdata")
+params <- readRDS("R_objects/animal_params.RDS")
+dat.clean <- subset(dat, !is.na(cecum_norm))
+
+# Set names of variables
+PREDICTOR <- "treatment"#c("treatment","pfos","van")
+OUTCOME <- "cecum_wt"
+SUBJECT <- "rat_name"
+
+# Create formula
+PREDICTOR.F <- ifelse(length(PREDICTOR) > 1, paste(PREDICTOR, collapse = "*"), PREDICTOR)
+FORMULA <- as.formula(paste(OUTCOME,PREDICTOR.F, sep = " ~ "))
+
+# Summary samples in groups
+dat.clean %>% group_by(across(all_of(PREDICTOR))) %>% get_summary_stats(!!sym(OUTCOME), type = "mean_sd")
+```
+
+#### **Visualise**
+
+Create a boxplot of the data.
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+# Create plot
+bxp <- dat.clean %>%
+  ggboxplot(x = if_else(length(PREDICTOR) > 1, PREDICTOR[2],PREDICTOR[1]),
+            y = OUTCOME,
+            color = PREDICTOR[1],
+            facet.by = if(length(PREDICTOR) == 3) PREDICTOR[3],
+            palette = params$COL)
+bxp
+
+```
+#### **Assumptions and preliminary tests**
+
+The ANOVA tests assume the following characteristics about the data:
+
+-   **Independence of the observations.** Each subject should belong to only one group. There is no relationship between the observations in each group.\
+    *This is already done for the whole project*
+
+-   **No significant outliers** in the two groups
+
+-   **Normality.** the data for each group should be approximately normally distributed.
+
+-   **Homogeneity of variances.** the variance of the outcome variable should be equal in each group.
+
+In this section, we'll perform some preliminary tests to check whether these assumptions are met.
+
+**Identify outliers**\
+Outliers can be easily identified using boxplot methods, implemented in the R function identify_outliers() [rstatix package].
+
+```{r, eval=TRUE}
+# Test for outliers
+dat.clean %>% 
+  group_by(across(all_of(PREDICTOR))) %>% 
+  identify_outliers(!!sym(OUTCOME))
+```
+
+Data contains six not critical outliers.
+
+**Check normality**\
+QQ plot and Shapiro-Wilk test of normality are used to analyze the model residuals.
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+# Build the linear model
+model  <- lm(FORMULA, data = dat.clean)
+# Create a QQ plot of residuals
+ggqqplot(residuals(model))
+# Compute Shapiro-Wilk test of normality
+shapiro_test(residuals(model))
+```
+
+**Test homogneity of variance assumption**\
+1. The residuals versus fits plot can be used to check the homogeneity of variances.
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+plot(model, 1)
+```
+
+2.  It's also possible to use the Levene's test to check the homogeneity of variances:
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+dat.clean %>% levene_test(FORMULA)
+
+# Save result
+EQUAL.VAR <- dat.clean %>% levene_test(FORMULA) %>% pull(p) > 0.05
+
+```
+
+This shows that normalised cecum weight data has six non-critical outliers, is normally distribution and has equal variance. Therefore we use a **one-way ANOVA test with Tukey's honest significance test**.
+
+#### ANOVA One-Way test
+
+##### **Perform test**
+
+If we had equality of variance we can now run a one-way ANOVA tests `anova_test()` (if we have equal variance) or a `welch_anova_test()` (if variance vary).
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+
+if(EQUAL.VAR) {
+  res.aov <- dat.clean %>% anova_test(cecum_wt ~ pfos*van)
+  res.aov
+} else {
+  res.aov <- dat.clean %>% welch_anova_test(FORMULA)
+  res.aov
+}
+
+```
+
+##### **Perform posthoc test**
+
+A significant one-way ANOVA is generally followed up by Tukey post-hoc tests to perform multiple pairwise comparisons between groups. When running relaxed Welch one-way test, the Games-Howell post hoc test or pairwise t-tests (with no assumption of equal variances) can be used to compare all possible combinations of group differences.
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+if(EQUAL.VAR) {
+  pwc <- dat.clean %>% tukey_hsd(FORMULA)
+  pwc
+} else {
+  pwc <- dat.clean %>% games_howell_test(FORMULA)
+  pwc
+}
+```
+
+### Create figure
+```{r , eval=TRUE, echo=TRUE}
+## Prepare statistical information:
+pwc.adj <- pwc %>% 
+  add_x_position(x = PREDICTOR) %>%
+  p_format("p.adj", accuracy = 0.0001, trailing.zero = TRUE, new.col = TRUE)
+
+# Format for ggplot
+if (sum(pwc.adj$p.adj.signif != "ns") == 0) {
+  stat.sig <- pwc.adj %>%
+    add_y_position(step.increase = 0.25) %>%
+    mutate(y.position = seq(min(y.position), max(y.position),length.out = n()))
+} else {
+  stat.sig <- pwc.adj[pwc.adj$p.adj.signif != "ns",] %>%
+    add_y_position(step.increase = 0.25) %>%
+    mutate(y.position = seq(min(y.position), max(y.position),length.out = n()))
+}
+
+# Create plot
+p <- ggboxplot(dat.clean, x = PREDICTOR, y = OUTCOME,
+          fill = PREDICTOR,
+          add =  "jitter",
+          add.params = list(size = 1)) +
+  scale_fill_manual(values = params$COL) +
+  scale_y_continuous(name = "grams",limits = c(0,15),breaks = seq(0,15,5)) +
+  labs(fill = "Treatment") +
+  scale_x_discrete(name = "Treatment")
+
+p <- p + stat_pvalue_manual(stat.sig, label = "p.adj.format",tip.length = 0, hide.ns = TRUE, y.position = c(12,14,13,15))
+p
+
+# Plot for saving without legend
+p2 <- p + theme(legend.position = "none")
+
+ggsave(filename = paste0("plots/animal_data/weight/",OUTCOME,"_plot.png"), p2, device = "png", dpi = 300, units = "mm", width = 100, height = 100)
+ggsave(filename = paste0("plots/animal_data/weight/",OUTCOME,"_plot.pdf"), p2, device = "pdf", dpi = 300, units = "mm", width = 100, height = 100)
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
+invisible(gc()) #free up memory and report the memory usage.
+```
+
+![Normalized cecum weights at day 8](plots/animal_data/weight/cecum_wt_plot.png){width="100%"}
+
 
 ## Cecum weight (normalized)
 This section will prepare to perform the data analysis for normalized cecum weight data
@@ -441,6 +633,186 @@ invisible(gc()) #free up memory and report the memory usage.
 ```
 
 ![Normalized cecum weights at day 8](plots/animal_data/weight/cecum_norm_plot.png){width="100%"}
+
+## Liver weight (grams)
+This section will prepare to perform the data analysis for liver weight data in grams
+
+### Statistics
+#### **Prepare data**
+
+This section sets the variables to be used and prepares the data if necessary.
+
+```{r, eval=TRUE}
+# load data 
+load("R_objects/animal_data.Rdata")
+params <- readRDS("R_objects/animal_params.RDS")
+# Remove NA in the data column
+dat.clean <- subset(dat, !is.na(liver_norm))
+
+# Set names of variables
+PREDICTOR <- "treatment"#c("treatment","pfos","van")
+OUTCOME <- "liver_wt"
+SUBJECT <- "rat_name"
+
+# Create formula
+PREDICTOR.F <- ifelse(length(PREDICTOR) > 1, paste(PREDICTOR, collapse = "*"), PREDICTOR)
+FORMULA <- as.formula(paste(OUTCOME,PREDICTOR.F, sep = " ~ "))
+
+# Summary samples in groups
+dat.clean %>% group_by(across(all_of(PREDICTOR))) %>% get_summary_stats(!!sym(OUTCOME), type = "mean_sd")
+```
+
+#### **Visualise**
+
+Create a boxplot of the data.
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+# Create plot
+bxp <- dat.clean %>%
+  ggboxplot(x = if_else(length(PREDICTOR) > 1, PREDICTOR[2],PREDICTOR[1]),
+            y = OUTCOME,
+            color = PREDICTOR[1],
+            facet.by = if(length(PREDICTOR) == 3) PREDICTOR[3],
+            palette = params$COL)
+bxp
+
+```
+#### **Assumptions and preliminary tests**
+
+The ANOVA tests assume the following characteristics about the data:
+
+-   **Independence of the observations.** Each subject should belong to only one group. There is no relationship between the observations in each group.\
+    *This is already done for the whole project*
+
+-   **No significant outliers** in the two groups
+
+-   **Normality.** the data for each group should be approximately normally distributed.
+
+-   **Homogeneity of variances.** the variance of the outcome variable should be equal in each group.
+
+In this section, we'll perform some preliminary tests to check whether these assumptions are met.
+
+**Identify outliers**\
+Outliers can be easily identified using boxplot methods, implemented in the R function identify_outliers() [rstatix package].
+
+```{r, eval=TRUE}
+# Test for outliers
+dat.clean %>% 
+  group_by(across(all_of(PREDICTOR))) %>% 
+  identify_outliers(!!sym(OUTCOME))
+```
+
+Data contains one non-critical outlier.
+
+**Check normality**\
+QQ plot and Shapiro-Wilk test of normality are used to analyze the model residuals.
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+# Build the linear model
+model  <- lm(FORMULA, data = dat.clean)
+# Create a QQ plot of residuals
+ggqqplot(residuals(model))
+# Compute Shapiro-Wilk test of normality
+shapiro_test(residuals(model))
+```
+
+**Test homogneity of variance assumption**\
+1. The residuals versus fits plot can be used to check the homogeneity of variances.
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+plot(model, 1)
+```
+
+2.  It's also possible to use the Levene's test to check the homogeneity of variances:
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+dat.clean %>% levene_test(FORMULA)
+
+# Save result
+EQUAL.VAR <- dat.clean %>% levene_test(FORMULA) %>% pull(p) > 0.05
+
+```
+
+This shows that normalised liver weight data has one non-critical outlier, is normally distribution and has equal variance. Therefore we use a **one-way ANOVA test with Tukey's honest significance test**.
+
+#### ANOVA One-Way test
+
+##### **Perform test**
+
+If we had equality of variance we can now run a one-way ANOVA tests `anova_test()` (if we have equal variance) or a `welch_anova_test()` (if variance vary).
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+
+if(EQUAL.VAR) {
+  res.aov <- dat.clean %>% anova_test(liver_wt ~ pfos*van) #FORMULA
+  res.aov
+} else {
+  res.aov <- dat.clean %>% welch_anova_test(FORMULA)
+  res.aov
+}
+
+```
+
+##### **Perform posthoc test**
+
+A significant one-way ANOVA is generally followed up by Tukey post-hoc tests to perform multiple pairwise comparisons between groups. When running relaxed Welch one-way test, the Games-Howell post hoc test or pairwise t-tests (with no assumption of equal variances) can be used to compare all possible combinations of group differences.
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+if(EQUAL.VAR) {
+  pwc <- dat.clean %>% tukey_hsd(FORMULA) #FORMULA
+  pwc
+} else {
+  pwc <- dat.clean %>% games_howell_test(FORMULA)
+  pwc
+}
+```
+
+
+#### Create figure
+```{r , eval=TRUE, echo=TRUE}
+## Prepare statistical information:
+pwc.adj <- pwc %>% 
+  add_x_position(x = PREDICTOR) %>%
+  p_format("p.adj", accuracy = 0.0001, trailing.zero = TRUE, new.col = TRUE)
+
+# Format for ggplot
+if (sum(pwc.adj$p.adj.signif != "ns") == 0) {
+  stat.sig <- pwc.adj %>%
+    add_y_position(step.increase = 0.25) %>%
+    mutate(y.position = seq(min(y.position), max(y.position),length.out = n()))
+} else {
+  stat.sig <- pwc.adj[pwc.adj$p.adj.signif != "ns",] %>%
+    add_y_position(step.increase = 0.25) %>%
+    mutate(y.position = seq(min(y.position), max(y.position),length.out = n()))
+}
+
+# Create plot
+p <- ggboxplot(dat.clean, x = PREDICTOR, y = OUTCOME,
+          fill = PREDICTOR,
+          add =  "jitter",
+          add.params = list(size = 1)) +
+  scale_fill_manual(values = params$COL) +
+  scale_y_continuous(name = "µg/g") + #,limits = c(8,17),breaks = seq(8,17,2)
+  labs(fill = "Treatment") +
+  scale_x_discrete(name = "Treatment")
+
+p <- p + stat_pvalue_manual(stat.sig, label = "p.adj.format",tip.length = 0, hide.ns = TRUE) #, y.position = c(1.35,1.4,1.45,1.5)
+p
+
+# Plot for saving without legend
+p2 <- p + theme(legend.position = "none")
+
+ggsave(filename = paste0("plots/animal_data/weight/",OUTCOME,"_plot.png"), p2, device = "png", dpi = 300, units = "mm", width = 100, height = 100)
+ggsave(filename = paste0("plots/animal_data/weight/",OUTCOME,"_plot.pdf"), p2, device = "pdf", dpi = 300, units = "mm", width = 100, height = 100)
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
+invisible(gc()) #free up memory and report the memory usage.
+```
+
+![Liver weights at day 8](plots/animal_data/weight/liver_wt_plot.png){width="100%"}
+
+
 
 ## Liver weight (normalized)
 This section will prepare to perform the data analysis for normalized liver weight data
@@ -2074,7 +2446,8 @@ p <- ggboxplot(dat.clean, x = PREDICTOR, y = OUTCOME,
   scale_fill_manual(values = COL,labels = c("PFOS day 4","VAN+PFOS day 4","PFOS day 8","VAN+PFOS day 8")) +
   scale_y_continuous(name = "ug/mL",limits = c(0,85),breaks = seq(0,85,10)) +
   labs(fill = "Treatment") +
-  scale_x_discrete(name = "Treatment", labels = c("PFOS\nday 4","VAN+PFOS\nday 4","PFOS\nday 8","VAN+PFOS\nday 8"))
+  scale_x_discrete(name = "Treatment", labels = c("PFOS\nDay 4","VAN+PFOS\nDay 4","PFOS\nDay 8","VAN+PFOS\nDay 8")) +
+  theme(axis.title.x = element_blank())
 
 p <- p + stat_pvalue_manual(stat.sig, label = "p.adj.format",tip.length = 0, hide.ns = FALSE, y.position = c(75,85,70,80))
 p
@@ -2449,25 +2822,30 @@ p <- ggboxplot(dat, x = PREDICTOR, y = OUTCOME,
           add =  "jitter",
           add.params = list(size = 1)) +
   scale_fill_manual(values = params$COL) +
-  scale_y_continuous(name = "ug/g",limits = c(0,300),breaks = seq(0,300,50)) +
-  labs(fill = "Treatment") +
+  scale_y_continuous(name = "ug/g",limits = c(0,270),breaks = seq(0,270,0.5)) +
+  scale_y_break(breaks = c(1,140), scales = 3, ticklabels = c(150,200,250), space = 0.3) +
+  theme(axis.title.x = element_blank(),
+        axis.line.y.right = element_blank(),
+        axis.text.y.right = element_blank(),
+        axis.ticks.y.right = element_blank()) +
   scale_x_discrete(name = "Treatment")
 
-p <- p + stat_pvalue_manual(stat.sig, label = "p.adj.format",tip.length = 0, hide.ns = TRUE, y.position = c(240,280,260,240))
+p <- p + stat_pvalue_manual(stat.sig, label = "p.adj.format",tip.length = 0, hide.ns = TRUE, y.position = c(235,265,250,235))
 p
 
 # Plot for saving without legend
 p2 <- p + theme(legend.position = "none")
+p2
 
-ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_plot.png"), p2, device = "png", dpi = 300, units = "mm", width = 100, height = 100)
-ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_plot.pdf"), p2, device = "pdf", dpi = 300, units = "mm", width = 100, height = 100)
-ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_plot_legend.pdf"), p, device = "pdf", dpi = 300, units = "mm", width = 100, height = 100)
+ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_plot.png"), p2, device = "png", dpi = 300, units = "mm", width = 107, height = 100)
+ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_plot.pdf"), p2, device = "pdf", dpi = 300, units = "mm", width = 107, height = 100)
+ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_plot_legend.pdf"), p, device = "pdf", dpi = 300, units = "mm", width = 110, height = 100)
 
 # clear the environment and release memory
 rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
 invisible(gc()) #free up memory and report the memory usage.
 ```
-![PFOS conc. in ug/g at day 8](plots/animal_data/pfos/pfos_serum8_ugml_plot.png){width="100%"}
+![PFOS conc. in ug/g at day 8](plots/animal_data/pfos/pfos_liver_ugg_plot.png){width="100%"}
 ### mg in liver tissue in all groups
 #### **Prepare data**
 
@@ -2647,7 +3025,7 @@ ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_all_plot_legend.pdf
 rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
 invisible(gc()) #free up memory and report the memory usage.
 ```
-![PFOS conc. in ug/g at day 8](plots/animal_data/pfos/pfos_serum8_ugml_plot.png){width="100%"}
+![PFOS conc. in ug/g at day 8](plots/animal_data/pfos/pfos_liver_mg_all_plot.png){width="100%"}
 
 ### Total mg in liver 
 #### **Prepare data**
@@ -2908,7 +3286,7 @@ If both Shapiro test has p \> 0.05 and/ or the QQplot follows the reference line
 **Check the equality of variances**\
 This can be done using the Levene's test. If the variances of groups are equal, the p-value should be greater than 0.05.
 
-```{r, warning=F}
+```{r , warning=FALSE}
 # Run test
 dat.clean %>% levene_test(FORMULA)
 
@@ -3023,22 +3401,28 @@ tmp <- dat.sub[ , c("rat_name","ordering","treatment","tot_pfos8","pfos_serum8_m
 
 # Calculate ratios
 for (i in tmp$rat_name) {
-  tmp$total <- tmp$pfos_liver_mg + tmp$pfos_serum8_mg
+  tmp$total_measured <- tmp$pfos_liver_mg + tmp$pfos_serum8_mg
   }
 for (i in tmp$rat_name) {
-  tmp$leftover <- tmp$tot_pfos8 - tmp$total
+  tmp$leftover <- tmp$tot_pfos8 - tmp$total_measured
   }
 
 # Calculate percentage of detected PFOS in rats
 for (i in tmp$rat_name) {
-  tmp$pct_det <- tmp$total / tmp$tot_pfos8 * 100
+  tmp$pct_det <- tmp$total_measured / tmp$tot_pfos8 * 100
+  tmp$pct_liver <- tmp$pfos_liver_mg / tmp$tot_pfos8 * 100
+  tmp$pct_serum <- tmp$pfos_serum8_mg / tmp$tot_pfos8 * 100
 }
 
 print("Group: PFOS")
 tmp %>% subset(treatment == "PFOS") %>% select(pct_det) %>% summary()
+tmp %>% subset(treatment == "PFOS") %>% select(pct_liver) %>% summary()
+tmp %>% subset(treatment == "PFOS") %>% select(pct_serum) %>% summary()
 
 print("Group: VAN+PFOS")
 tmp %>% subset(treatment == "VAN+PFOS") %>% select(pct_det) %>% summary()
+tmp %>% subset(treatment == "VAN+PFOS") %>% select(pct_liver) %>% summary()
+tmp %>% subset(treatment == "VAN+PFOS") %>% select(pct_serum) %>% summary()
 
 ```
 
@@ -3093,7 +3477,7 @@ EQUAL.VAR <- dat.clean %>% levene_test(FORMULA) %>% pull(p) > 0.05
 
 ```
 
-Data contains one not extreme outlier, is normally distributed, and has equal variance. Therefore we perform **unpaired two-tailed t-test**. 
+Data contain one not extreme outlier, is normally distributed, and has equal variance. Therefore we perform **unpaired two-tailed t-test**. 
 
 #### PERFORM TEST
 
@@ -3126,7 +3510,7 @@ p <- ggplot(tmp2, aes(x = rat_name, y = mg, fill = fct_rev(type))) +
   theme_pubr(legend = "top") +
   facet_grid(~ treatment, scales = "free_x") +
   labs(fill = "Sample type", x = "Rats", y = "% of total dosed") +
-  scale_fill_manual(values = c("Unaccounted"= "#ffffff", "PFOS liver" = "#FEBE00", "PFOS serum" = "#A91B0D")) +
+  scale_fill_manual(values = c("Unaccounted"= "#ffffff", "PFOS liver" = "#FECE00", "PFOS serum" = "#cf200D")) +
   theme(axis.text.x=element_blank(),
         axis.ticks.x=element_blank()) +
   scale_y_continuous(labels = function(x) paste0(x*100, "%"))
@@ -3142,7 +3526,7 @@ p <- ggplot(tmp2, aes(x = treatment, y = mg, fill = fct_rev(type))) +
   geom_bar(position = "fill", stat = "identity") +
   theme_pubr(legend = "top") +
   labs(fill = "Sample type", x = "Treatment",y = "% of total dosed") +
-  scale_fill_manual(values = c("Unaccounted"= "#ffffff", "PFOS liver" = "#FEBE00", "PFOS serum" = "#A91B0D")) +
+  scale_fill_manual(values = c("Unaccounted"= "#ffffff", "PFOS liver" = "#FECE00", "PFOS serum" = "#cf200D")) +
   theme(axis.ticks.x=element_blank()) +
   scale_y_continuous(labels = function(x) paste0(x*100, "%"))
 p
@@ -3158,9 +3542,624 @@ rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
 invisible(gc()) #free up memory and report the memory usage.
 ```
 
+## Liver-to-serum (µg/g / ug/g) ratio
+
+### Analysis and boxplot 
+#### **Prepare data**
+
+```{r , eval=TRUE, echo=TRUE}
+# load data 
+load("R_objects/animal_data.Rdata")
+params <- readRDS("R_objects/animal_params.RDS")
+
+# Create new dataframe with pfos data
+dat.sub <- subset(dat, pfos == "yes")
+tmp <- dat.sub[ , c("rat_name","ordering","treatment","pfos_serum8_ugml","pfos_liver_ugg")]
+
+# Calculate ratios
+for (i in tmp$rat_name) {
+  tmp$ls_ratio <- tmp$pfos_liver_ugg / tmp$pfos_serum8_ugml
+  }
+
+print("Group: PFOS")
+tmp %>% subset(treatment == "PFOS") %>% select(ls_ratio) %>% summary()
+
+print("Group: VAN+PFOS")
+tmp %>% subset(treatment == "VAN+PFOS") %>% select(ls_ratio) %>% summary()
+
+tmp %>% group_by(across(all_of("treatment"))) %>% get_summary_stats(!!sym("ls_ratio"), type = "mean_sd")
+
+```
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE, warning=FALSE}
+# Analysis of significance between treatment groups
+# Set names of variables
+PREDICTOR <- "treatment"
+OUTCOME <- "ls_ratio"
+SUBJECT <- "rat_name"
+
+# Subset to a specific variable
+dat.clean <- tmp
+
+# Will you run a paired test? (set variable to `TRUE` or `FALSE`)
+PAIRED <- FALSE
+
+# Create formula
+FORMULA <- as.formula(paste(OUTCOME, PREDICTOR, sep = "~"))
+
+# Sort data for paired test
+if (PAIRED) {
+  # Order data
+  dat.clean <- arrange(dat.clean, !!sym(SUBJECT))
+  
+  # Remove unpaired samples
+  dat.clean <- dat.clean %>% 
+    group_by(!!sym(SUBJECT)) %>%
+    filter(n() != 1) %>%
+    arrange(!!sym(PREDICTOR), !!sym(SUBJECT)) %>%
+    droplevels() %>% 
+    ungroup()
+}
+
+# identify outliers
+dat.clean %>%
+  group_by(!!sym(PREDICTOR)) %>%
+  identify_outliers(!!sym(OUTCOME))
+
+# Run Shapiro test
+dat.clean %>% 
+  group_by(!!sym(PREDICTOR)) %>%
+  shapiro_test(!!sym(OUTCOME))
+  
+# Create QQplot
+ggqqplot(dat.clean, x = OUTCOME, facet.by = PREDICTOR)
+
+# Run test
+dat.clean %>% levene_test(FORMULA)
+
+# Save output
+EQUAL.VAR <- dat.clean %>% levene_test(FORMULA) %>% pull(p) > 0.05
+
+```
+
+Data contains no outliers, is normally distributed, and has equal variance. Therefore we perform **unpaired two-tailed t-test**. 
+
+#### PERFORM TEST
+
+**T-test**\
+We are now ready to perform the test
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+stat.test <- dat.clean %>% 
+  t_test(FORMULA,
+         var.equal = EQUAL.VAR,
+         detailed = TRUE,
+         paired = FALSE,
+         alternative = "two.sided") %>%
+  add_significance()
+stat.test
+
+```
+Result of t-test show that there is no significant difference between the total percentage of detected PFOS (where 100% is the total dose) between the two groups.
+
+#### Create boxplot
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+
+p <- ggboxplot(dat.clean, x = "treatment", y = "ls_ratio",
+               fill = "treatment",
+               add = "jitter",
+               add.params = list(size = 1)) +
+  theme_pubr(legend = "top") +
+  scale_fill_manual(values = params$COL) +
+  theme(axis.title.x = element_blank()) +
+  labs(fill = "Treatment", y = "Liver-to-serum PFOS ratio") +
+  stat_pvalue_manual(stat.test, tip.length = 0, hide.ns = FALSE, y.position = c(11))
+p
+p2 <- p + theme(legend.position = "none")
+
+ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_boxplot.png"), p, device = "png", dpi = 300, units = "mm", width = 90, height = 100)
+ggsave(filename = paste0("plots/animal_data/pfos/",OUTCOME,"_boxplot.pdf"), p2, device = "pdf", dpi = 300, units = "mm", width = 64, height = 100)
+
+# clear the environment and release memory
+rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
+invisible(gc()) #free up memory and report the memory usage.
+```
+
+# PFOS ISOMER ANALYSIS {.tabset .tabset-fade .tabset-pills}
+In this section we investigate linear (l-PFOS) and branched PFOS (br-PFOS) by a ratio of the two based on calculated peak area expressed as "bl-ratio". These data are obtained from quantitative mass spectrometry analysis on retention-time peaks for br-PFOS and l-PFOS, respectively.
+
+Factors that will be investigated are each sample type (material: "Serum", "Liver"), day of measurement (only applies to serum; day: "d4", "d8"), treatment groups and level of bl-ratio between samples and solvent controls spiked with same batch of PFOS used for oral gavage (treatment: "PFOS", "VAN+PFOS", "Control" = where control are spiked controls; type: "Sample","Control").
+
+## Import data
+Data is imported from CSV format and bl-ratios are calculated by br-PFOS / l-PFOS.
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+# Load analysis data
+dat <- read.csv("input/pfos_isomer_data.csv", header = TRUE, sep = ";", dec = ",")
+
+# Calculate branched-linear PFOS ratio based off AMT
+for (i in dat$id) {
+  dat$bl_ratio <- dat$area_branch / dat$area_linear
+}
+# Create common predictor for later analysis
+for (i in dat$id) {
+  dat$mat_treat <- paste0(dat$material,"_",dat$treatment)
+}
+
+save(dat, file = "R_objects/pfos_isomer_data.Rdata")
+```
+
+## Prepare Serum data
+Investigation of bl-ratio in treatment groups in serum samples on Day 4 and Day 8.
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+#  Load data
+load("R_objects/pfos_isomer_data.Rdata")
+
+# Subset
+dat.clean <- subset(dat, material == "Serum" & !treatment == "Control")
+
+# Set names of variables
+PREDICTOR <- c("day","treatment")#c("treatment","pfos","van")
+OUTCOME <- "bl_ratio"
+SUBJECT <- "rat_name"
+
+# Create formula
+PREDICTOR.F <- ifelse(length(PREDICTOR) > 1, paste(PREDICTOR, collapse = "*"), PREDICTOR)
+FORMULA <- as.formula(paste(OUTCOME,PREDICTOR.F, sep = " ~ "))
+
+# Summary samples in groups
+dat.clean %>% group_by(across(all_of(PREDICTOR))) %>% get_summary_stats(!!sym(OUTCOME), type = "mean_sd")
+
+# Test for outliers
+dat.clean %>% 
+  group_by(across(all_of(PREDICTOR))) %>% 
+  identify_outliers(!!sym(OUTCOME))
+
+# Check normality
+# Build the linear model
+model  <- lm(FORMULA, data = dat.clean)
+# Create a QQ plot of residuals
+ggqqplot(residuals(model))
+# Compute Shapiro-Wilk test of normality
+shapiro_test(residuals(model))
+
+# Check the homogeneity of variances with Levene's test
+dat.clean %>% levene_test(FORMULA)
+
+# Save result
+EQUAL.VAR <- dat.clean %>% levene_test(FORMULA) %>% pull(p) > 0.05
+
+```
+
+This shows that data has one outlier, is normally distribution and has equal variance. Therefore we can test the data with a **one-way ANOVA test with Tukey's honest significance test**.
+
+### ANOVA One-Way test
+
+#### **Perform test**
+
+If we had equality of variance we can now run a one-way ANOVA tests `anova_test()` (if we have equal variance) or a `welch_anova_test()` (if variance vary).
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+
+if(EQUAL.VAR) {
+  res.aov <- dat.clean %>% anova_test(FORMULA)
+  res.aov
+} else {
+  res.aov <- dat.clean %>% welch_anova_test(FORMULA)
+  res.aov
+}
+
+```
+
+#### **Perform posthoc test**
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+if(EQUAL.VAR) {
+  pwc <- dat.clean %>% tukey_hsd(FORMULA)
+  pwc
+} else {
+  pwc <- dat.clean %>% games_howell_test(FORMULA)
+  pwc
+}
+```
+
+Significant impact is observed between days in the VAN+PFOS groups and between treatment groups on Day 4. We will plot this as a nested analysis with pairwise t-tests on the inner variable and the outer variable.
+
+#### Create figure
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+## Pairwise comparison for inner variable: day
+stat.in <- dat.clean %>%
+  group_by(treatment) %>%
+  t_test(bl_ratio ~ day, 
+         paired = FALSE, var.equal = EQUAL.VAR, 
+         detailed = TRUE, alternative = "two.sided") %>%
+  add_significance() %>%
+  p_format("p", accuracy = 0.001, trailing.zero = TRUE, new.col = TRUE)
+stat.in
+
+## Pairwise comparison for outer variable: treatment
+stat.out <- dat.clean %>%
+  t_test(bl_ratio ~ treatment,
+         paired = FALSE, var.equal = EQUAL.VAR,
+         detailed = TRUE, alternative = "two.sided") %>%
+  add_significance() %>%
+  p_format("p", accuracy = 0.001, trailing.zero = TRUE, new.col = TRUE)
+stat.out
+
+## Calculate positions statistics on plot
+stat.in <- stat.in %>% add_xy_position(x = "treatment", dodge = 0.8)
+stat.out <- stat.out %>% add_xy_position(x = "treatment")
+stat.out$y.position <- max(stat.in$y.position)*1.03
+
+# Create plot
+p <- ggboxplot(dat.clean, x = "treatment", y = "bl_ratio",
+               fill = "day",
+               color = "day",
+               add = "jitter",
+               add.params = list(size = 1)) +
+  theme_pubr(legend = "top") +
+  scale_color_manual(values = c("d4" = "black","d8" = "black")) +
+  scale_fill_manual(values = c("#ffffff","#aaaaaa"), name = "Day", labels = c("4","8")) +
+  scale_y_continuous(name = "Serum B/L ratio", limits = c(0.15,0.3), breaks = seq(0.15,0.3,0.05)) +
+  theme(axis.title.x = element_blank()) +
+  guides(color = "none")
+
+p.stat <- p + stat_pvalue_manual(stat.in, tip.length = 0, hide.ns = FALSE) +
+  stat_pvalue_manual(stat.out, tip.length = 0, hide.ns = FALSE)
+p.stat
+
+suppressMessages(ggsave(filename = "plots/animal_data/pfos/isomer_branched-linear_serum.pdf", plot = p.stat, device = "pdf", dpi = 300, units = "mm", height = 100, width = 100))
+suppressMessages(ggsave(filename = "plots/animal_data/pfos/isomer_branched-linear_serum.png", plot = p.stat, device = "png", dpi = 300, units = "mm", height = 100, width = 100))
+
+```
+
+## Prepare Liver data
+Investigation of bl-ratio in treatment groups in liver samples. These are only tested for Day 8, as being the only sampling day for liver.
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+#  Load data
+load("R_objects/pfos_isomer_data.Rdata")
+
+# Subset
+dat.clean <- subset(dat, material == "Liver" & !treatment == "Control")
+
+# Set names of variables
+PREDICTOR <- "treatment"#c("treatment","pfos","van")
+OUTCOME <- "bl_ratio"
+SUBJECT <- "rat_name"
+
+# Create formula
+PREDICTOR.F <- ifelse(length(PREDICTOR) > 1, paste(PREDICTOR, collapse = "*"), PREDICTOR)
+FORMULA <- as.formula(paste(OUTCOME,PREDICTOR.F, sep = " ~ "))
+
+# Summary samples in groups
+dat.clean %>% group_by(across(all_of(PREDICTOR))) %>% get_summary_stats(!!sym(OUTCOME), type = "mean_sd")
+
+# Test for outliers
+dat.clean %>% 
+  group_by(across(all_of(PREDICTOR))) %>% 
+  identify_outliers(!!sym(OUTCOME))
+
+# Check normality
+# Run Shapiro test
+dat.clean %>% 
+  group_by(!!sym(PREDICTOR)) %>%
+  shapiro_test(!!sym(OUTCOME))
+  
+# Create QQplot
+ggqqplot(dat.clean, x = OUTCOME, facet.by = PREDICTOR)
+
+# Check the homogeneity of variances with Levene's test
+# Run test
+dat.clean %>% levene_test(FORMULA)
+
+# Save output
+EQUAL.VAR <- dat.clean %>% levene_test(FORMULA) %>% pull(p) > 0.05
+
+```
+
+Two outliers were identified. Data is normally distributed and has equal variance. Hence we use **two-tailed t-test**.
+
+### PERFORM TEST
+
+**T-test**\
+We are now ready to perform the test
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+stat.test <- dat.clean %>% 
+  t_test(FORMULA,
+         var.equal = EQUAL.VAR,
+         detailed = TRUE,
+         paired = FALSE,
+         alternative = "two.sided") %>%
+  add_significance()
+stat.test
+
+```
+
+**Effect size**\
+The effect size is calculated as Cohen's D
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+dat.clean %>% cohens_d(FORMULA, 
+                       var.equal = EQUAL.VAR,
+                       paired = FALSE)
+
+```
+No significance is observed between treatment groups in the liver samples. We present this in a plot using the above statistics.
+
+### Create figure
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+
+# Create plot
+p <- ggboxplot(dat.clean, x = "treatment", y = "bl_ratio",
+               fill = "treatment",
+               add = "jitter",
+               add.params = list(size = 1)) +
+  theme_pubr(legend = "top") +
+  scale_fill_manual(values = params$COL, name = "Treatment") +
+  scale_y_continuous(name = "Liver B/L ratio", limits = c(0.15,0.3), breaks = seq(0.15,0.3,0.05)) +
+  theme(axis.title.x = element_blank()) +
+  stat_pvalue_manual(stat.test, tip.length = 0, hide.ns = FALSE, y.position = c(0.22))
+p
+suppressMessages(ggsave(filename = "plots/animal_data/pfos/isomer_branched-linear_liver.pdf", plot = p, device = "pdf", dpi = 300, units = "mm", height = 100, width = 60))
+suppressMessages(ggsave(filename = "plots/animal_data/pfos/isomer_branched-linear_liver.png", plot = p, device = "png", dpi = 300, units = "mm", height = 100, width = 60))
+
+
+```
+
+## Prepare test of "material" day 8
+Here we aim to test differences in bl-ratio between liver and serum on Day 8. We exclude Day 4 as there are no equivalent liver data to compare to and we know from previous that Day 4 serum has slightly higher bl-ratio than Day 8 and both being higher than Liver, making any statistical significant difference between materials apply to Day 4 Serum samples as well. Included in the samples presented here are spiked negative controls and solvent controls which all have had the same batch of PFOS added directly to the same before analysis. These controls reflect the batch proportion of l-PFOS to br-PFOS.
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+load("R_objects/pfos_isomer_data.Rdata")
+
+# Subset
+dat.clean <- subset(dat, day == "d8") #!treatment == "Control" &
+
+# Set names of variables
+PREDICTOR <- c("material","treatment")
+OUTCOME <- "bl_ratio"
+SUBJECT <- "rat_name"
+
+# Create formula
+PREDICTOR.F <- ifelse(length(PREDICTOR) > 1, paste(PREDICTOR, collapse = "*"), PREDICTOR)
+FORMULA <- as.formula(paste(OUTCOME,PREDICTOR.F, sep = " ~ "))
+
+# Summary samples in groups
+dat.clean %>% group_by(across(all_of(PREDICTOR))) %>% get_summary_stats(!!sym(OUTCOME), type = "mean_sd")
+
+# Test for outliers
+dat.clean %>% 
+  group_by(across(all_of(PREDICTOR))) %>% 
+  identify_outliers(!!sym(OUTCOME))
+
+# Check normality
+# Build the linear model
+model  <- lm(FORMULA, data = dat.clean)
+# Create a QQ plot of residuals
+ggqqplot(residuals(model))
+# Compute Shapiro-Wilk test of normality
+shapiro_test(residuals(model))
+
+# Check the homogeneity of variances with Levene's test
+dat.clean %>% levene_test(FORMULA)
+
+# Save result
+EQUAL.VAR <- dat.clean %>% levene_test(FORMULA) %>% pull(p) > 0.05
+
+```
+
+This shows that data has four none-critical outliers, is normally distribution and has equal variance. Therefore we can test the data with a **one-way ANOVA test with Tukey's honest significance test**.
+
+### ANOVA One-Way test
+
+#### **Perform test**
+
+If we had equality of variance we can now run a one-way ANOVA tests `anova_test()` (if we have equal variance) or a `welch_anova_test()` (if variance vary).
+
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+
+if(EQUAL.VAR) {
+  res.aov <- dat.clean %>% anova_test(FORMULA)
+  res.aov
+} else {
+  res.aov <- dat.clean %>% welch_anova_test(FORMULA)
+  res.aov
+}
+
+```
+
+#### **Perform posthoc test**
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+if(EQUAL.VAR) {
+  pwc <- dat.clean %>% tukey_hsd(FORMULA)
+  pwc
+} else {
+  pwc <- dat.clean %>% games_howell_test(FORMULA)
+  pwc
+}
+```
+
+Significant impact is observed overall between liver and serum, as well as between spiked controls and both treatment groups for each material. No significance is observed only between controls run with each material group and overall between treatment groups within serum and liver, respectively. We present this data as a nested plot with serum and liver grouping as inner and PFOS, VAN+PFOS and Control (treatment variable) as outer with accompanying t-test and anova with tukey's.
+
+### Create figure
+```{r}
+## Pairwise comparison for inner variable
+stat.in <- dat.clean %>%
+  group_by(treatment) %>%
+  t_test(bl_ratio ~ order, 
+         paired = FALSE, var.equal = EQUAL.VAR, 
+         detailed = TRUE, alternative = "two.sided") %>%
+  add_significance() %>%
+  p_format("p", accuracy = 0.001, trailing.zero = TRUE, new.col = TRUE)
+stat.in
+
+## Pairwise comparison for outer variable
+stat.out <- dat.clean %>%
+  anova_test(bl_ratio ~ treatment) %>%
+  add_significance() %>%
+  p_format("p", accuracy = 0.001, trailing.zero = TRUE, new.col = TRUE)
+stat.out
+
+pwc2 <- dat.clean %>%
+  tukey_hsd(bl_ratio ~ treatment) %>%
+  add_significance() %>%
+  p_format("p.adj", accuracy = 0.001, trailing.zero = TRUE, new.col = TRUE)
+pwc2
+
+
+## Calculate positions statistics on plot
+stat.in <- stat.in %>% add_xy_position(x = "treatment", dodge = 0.8)
+pwc2 <- pwc2 %>% add_xy_position(x = "treatment")
+pwc2$y.position <- max(stat.in$y.position)*1.1
+
+# Create plot
+p <- ggboxplot(dat.clean, x = "treatment", y = "bl_ratio",
+               fill = "order",
+               color = "order",
+               add = "jitter",
+               add.params = list(size = 1)) +
+  theme_pubr(legend = "top") +
+  scale_color_manual(values = c("A" = "black","B" = "black")) +
+  scale_fill_manual(values = c("B" = "#FECE00", "A" = "#cf200D"), name = "Sample type", labels = c("A" = "Serum", "B" = "Liver")) +
+  scale_y_continuous(name = "B/L ratio", limits = c(0.05,0.3), breaks = seq(0.05,0.3,0.05)) +
+  theme(axis.title.x = element_blank()) +
+  guides(color = "none")
+
+p.stat <- p + stat_pvalue_manual(stat.in, label = "p.signif", tip.length = 0, hide.ns = FALSE, y.position = c(0.11,0.25,0.25)) +
+  stat_pvalue_manual(pwc2, label = "p.adj.signif", tip.length = 0, hide.ns = FALSE, y.position = c(0.27,0.30,0.285))
+p.stat
+
+suppressMessages(ggsave(filename = "plots/animal_data/pfos/isomer_branched-linear_material.pdf", plot = p.stat, device = "pdf", dpi = 300, units = "mm", height = 100, width = 136))
+suppressMessages(ggsave(filename = "plots/animal_data/pfos/isomer_branched-linear_material.png", plot = p.stat, device = "png", dpi = 300, units = "mm", height = 100, width = 136))
+
+```
 
 # SHORT CHAIN FATTY ACID DATA {.tabset .tabset-fade .tabset-pills}
 Following section is handling data analysis of short chain fatty acids from colonic samples collected at day 8. Ten SCFAs are analysed by MS Omics A/S (Denmark), delivered as concentrations in millimolar (mM), and tested accordingly here.
+
+Concentrations in mM were recorded from proximal colonic samples collected from all animals at dissection.
+
+Following analyses conclude overall Principal Coordinate analysis with PERMANOVA and individual boxplots comparing compound concentrations between treatment groups.
+
+## PCOA AND PERMANOVA ANALYSIS OF SCFA
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+# Load data
+load("R_objects/animal_data.Rdata")
+params <- readRDS("R_objects/animal_params.RDS")
+
+dat.clean <- dat %>% select(rat_name, treatment, pfos, van,
+  acetic, propanoic, m2_propanoic, butanoic, m3_butanoic, pentanoic, hexanoic,formic, m4_pentanoic, heptanoic) # formic, m4_pentanoic, heptanoic excluded due to low sample count
+
+# Subset data with NA
+dat.clean <- subset(dat.clean, !dat.clean$rat_name == "R08") # Mostly <LOD - suspects error in sample handling
+
+# Create SCFA table
+row.names(dat.clean) <- dat.clean$rat_name
+dat.SCFA <- dat.clean %>% select(acetic, propanoic, m2_propanoic, butanoic, m3_butanoic, pentanoic, hexanoic)
+dat.SCFA
+
+# Change all zeros to NA
+dat.clean[dat.clean == 0] <- NA
+
+# Summary samples in groups
+tb <- dat.clean %>% group_by(across(all_of("treatment"))) %>% get_summary_stats(type = "mean_sd")
+
+```
+
+### DAtest (treatment)
+```{r , eval=TRUE}
+# Test best method 
+filt.test <- testDA(t(dat.SCFA), predictor = dat.clean$treatment, effectSize = 10, relative = FALSE, k = c(1,1,2))
+
+# Evaluate the plot and summary table
+sum.fil <- summary(filt.test)
+p.fil <- plot(filt.test)
+p.fil
+
+# Run DAtest
+DA.ttt(t(dat.SCFA), dat.clean$van)
+DA.aov(t(dat.SCFA), dat.clean$treatment) # ANOVA
+DA.per(t(dat.SCFA), dat.clean$pfos) # permanova
+DA.per(t(dat.SCFA), dat.clean$van) # permanova
+DA.kru(t(dat.SCFA), dat.clean$treatment) # Kruskal-Wallis
+
+```
+#### Conclusions
+Significant impact from treatment type was detected:
+ANOVA: Propanoic, butanoic, and hexanoic
+PERMANOVA: PFOS = no impact; VAN = All but m3_butanoic
+Kruskal: all but acetic acid
+
+#### PERMANOVA and PCoA (visualization)
+```{r , eval=TRUE, echo=TRUE, error=TRUE}
+# Scaling SCFA data
+scaled.SCFA <- scale(dat.SCFA, center = FALSE, scale = TRUE)
+
+# Calculating Bray-Curtis PCoA with capscale
+tmp2 <- capscale(as.matrix(scaled.SCFA) ~ 1, data = as.matrix(scaled.SCFA), distance = "bray", metaMDS = TRUE)
+
+# Collect data for plotting
+mds.samples <- data.frame(tmp2$CA$u)
+mds.scfa <- data.frame(tmp2$CA$v)
+
+# Prepare point zero and labels for arrows
+mds.scfa$label1 <- row.names(mds.scfa)
+mds.scfa$x <- 0
+mds.scfa$y <- 0
+
+# Rename labels
+mds.scfa <- mds.scfa %>% mutate("label2" = case_when(label1 == "acetic" ~ "Acetate",
+                                                     label1 == "propanoic" ~ "Propionate",
+                                                     label1 == "m2_propanoic" ~ "Isobutyrate",
+                                                     label1 == "butanoic" ~ "Butyrate",
+                                                     label1 == "m3_butanoic" ~ "Isovalerate",
+                                                     label1 == "pentanoic" ~ "Valerate",
+                                                     label1 == "hexanoic" ~ "Caproate"))
+
+# Bind with main data
+dat.mds <- cbind(dat.clean, mds.samples)
+
+# Create plot
+p <- ggplot() +
+  geom_point(data = dat.mds, mapping = aes(x = MDS1, y = MDS2, color = treatment)) +
+  stat_ellipse(data = dat.mds, mapping = aes(x = MDS1, y = MDS2, color = treatment, fill = treatment), geom = "polygon", alpha = 0.1) +
+  geom_segment(data = mds.scfa, mapping = aes(x=x, y=y, xend=0.35*MDS1, yend=0.35*MDS2), 
+               lineend = "butt",
+               linejoin = "round",
+               size = 0.5,
+               arrow = arrow(length = unit(0.3, 'cm'))) +
+  geom_label_repel(data = mds.scfa, 
+             mapping = aes(x = 0.35*MDS1, y = 0.35*MDS2), #
+             label = mds.scfa$label2,
+             size = 4,
+             min.segment.length = 0,
+             segment.alpha = 0.8,
+             box.padding = 0.3,
+             force = 1) +
+  theme_pubr(legend = "top") +
+  scale_color_manual(values = params$COL, name = "Treatment") +
+  scale_fill_manual(values = params$COL) +
+  labs(x = "Axis 1", y = "Axis 2") +
+  guides(fill = "none")
+p
+# Remove legend
+leg <- get_legend(p)
+p2 <- p + theme(legend.position = "none")
+
+# Add marginal boxplots
+p3 <- ggExtra::ggMarginal(p = p2, type = "boxplot", size = 10, groupFill = TRUE)
+p3
+
+# Add legend back to plot
+p4 <- plot_grid(leg, p3, ncol = 1, rel_heights = c(0.1,1), rel_widths = 1)
+p4
+
+# Save output
+suppressMessages(ggsave(filename = "plots/animal_data/scfa/PCOA_weighed.png", plot = p3, device = "png", dpi = 300, height = 140, width = 140, units = "mm"))
+suppressMessages(ggsave(filename = "plots/animal_data/scfa/PCOA_weighed.pdf", plot = p3, device = "pdf", dpi = 300, height = 140, width = 140, units = "mm"))
+
+
+```
+
 
 ## Formic acid / Formate
 ### **Prepare data**
@@ -4915,8 +5914,6 @@ rm(list = ls(all.names = TRUE)) #will clear all objects includes hidden objects.
 invisible(gc()) #free up memory and report the memory usage.
 
 ```
-
-
 
 # SETTINGS 
 

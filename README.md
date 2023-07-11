@@ -7,8 +7,8 @@ This project covers general data analysis as well as 16S V3 amplicon sequencing 
 and ileal samples collected during the project “Flurex” (internal animal
 study no. R20-22). Study was conducted at the National Food institute at
 Technical University of Denmark in the research group for Gut, Microbes
-and Health. R-based scripts used for data analysis is publicly available
-with the publication of this study. Final study title is:
+and Health. R-based scripts used for data analyses are publicly available
+with the publication of this study, titled:
 
 **Antibiotic modulation of the gut microbiota does not affect oral uptake and accumulation of perfluorooctane sulfonic acid (PFOS) in rats**
 
