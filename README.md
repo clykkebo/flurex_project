@@ -11,6 +11,7 @@ and Health. R-based scripts used for data analyses are publicly available
 with the publication of this study, titled:
 
 **Antibiotic modulation of the gut microbiota does not affect oral uptake and accumulation of perfluorooctane sulfonic acid (PFOS) in rats**
+[doi.org/10.1016/j.envpol.2023.122179](https://doi.org/10.1016/j.envpol.2023.122179)
 
 The project data contains weight data from all animals, quantitative data of short-chain fatty acids measured in colonic luminal content and PFOS measurements in serum and liver samples, and 16S V3 amplicon sequencing from feces samples from four different days along with cecum and ileum samples from one day from 48
 rats. There are feces samples from all rats from day 0, 2, 4 and 8.
